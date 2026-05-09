@@ -1,12 +1,13 @@
-"""Training script for bimodal head specialization experiment.
+"""Training script for ViT-S/16 on ImageNet-1K.
 
-Two modes:
-  --mode baseline     : finetune DeiT-S without regularizer (matched training)
-  --mode regularized  : finetune DeiT-S with bimodal head distance regularizer
+Modes (controlled by config YAML):
+  reg_type: none     -> baseline CE-only finetuning
+  reg_type: spread   -> CE + spread loss (MAD variance maximisation)
+  reg_type: bimodal  -> CE + bimodal mixture prior on MAD
 
 Usage:
-  CUDA_VISIBLE_DEVICES=2 python train.py --mode baseline --epochs 30
-  CUDA_VISIBLE_DEVICES=2 python train.py --mode regularized --epochs 30
+  python train.py --config configs/baseline.yaml
+  python train.py --config configs/spread_weak.yaml
 """
 
 import argparse
@@ -15,6 +16,7 @@ import math
 import os
 import sys
 import time
+import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -25,96 +27,110 @@ from torch.cuda.amp import GradScaler, autocast
 from timm.data.mixup import Mixup
 from tqdm import tqdm
 
-from common import config as cfg
-from common.model_utils import load_deit_small
+from common.config import load_config, save_config
+from common.model_utils import load_vit_small
 from common.attention_hooks import (
     patch_attention_forward,
     get_cached_attn_weights,
     clear_cached_attn_weights,
+    capture_attention,
 )
-from common.bimodal_loss import BimodalHeadLoss
-from common.mad_metrics import build_distance_matrix, compute_mad
-from data import get_train_loader, get_val_loader, get_debug_loaders
+from common.regularisers import build_regulariser
+from common.mad_metrics import (
+    build_distance_matrix,
+    compute_mad,
+    compute_local_mass,
+    compute_attention_entropy,
+    compute_inter_head_mad_variance,
+)
+from data import get_train_loader, get_val_loader, get_attention_eval_subset
 
+
+# ─── Schedules ───────────────────────────────────────────────────────────────
 
 def get_cosine_schedule_with_warmup(optimizer, warmup_epochs, total_epochs, min_lr=1e-6):
-    """Cosine LR schedule with linear warmup."""
     def lr_lambda(epoch):
         if epoch < warmup_epochs:
             return epoch / max(1, warmup_epochs)
         progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        return max(min_lr / optimizer.defaults["lr"], 0.5 * (1.0 + math.cos(math.pi * progress)))
+        return max(min_lr / optimizer.defaults["lr"],
+                   0.5 * (1.0 + math.cos(math.pi * progress)))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def get_warmup_factor(epoch, warmup_epochs):
-    """Linear warmup for regularizer weight."""
+def get_reg_warmup_factor(epoch, warmup_epochs):
     if epoch >= warmup_epochs:
         return 1.0
     return epoch / max(1, warmup_epochs)
 
 
-@torch.no_grad()
-def validate(model, val_loader, device):
-    model.eval()
-    correct1 = 0
-    correct5 = 0
-    total = 0
+# ─── Validation ──────────────────────────────────────────────────────────────
 
+@torch.no_grad()
+def validate(model, val_loader, criterion, device):
+    model.eval()
+    correct1 = correct5 = total = 0
+    total_loss = 0.0
     for images, targets in val_loader:
         images, targets = images.to(device), targets.to(device)
         outputs = model(images)
+        loss = criterion(outputs, targets)
+        total_loss += loss.item() * images.size(0)
         _, pred5 = outputs.topk(5, dim=1)
         correct1 += (pred5[:, 0] == targets).sum().item()
         correct5 += (pred5 == targets.unsqueeze(1)).any(dim=1).sum().item()
         total += targets.size(0)
+    return {
+        "val_loss": total_loss / max(1, total),
+        "val_acc1": 100.0 * correct1 / max(1, total),
+        "val_acc5": 100.0 * correct5 / max(1, total),
+    }
 
-    acc1 = 100.0 * correct1 / total
-    acc5 = 100.0 * correct5 / total
-    return acc1, acc5
 
+# ─── Attention stats ────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def compute_epoch_mads(model, val_loader, device, dist_matrix, num_batches=10):
-    """Compute per-block MAD on a few val batches for logging."""
-    from common.attention_hooks import capture_attention
+def compute_attention_stats(model, loader, device, dist_matrix, cfg):
+    """Compute per-layer/per-head MAD, local mass, entropy on a val subset."""
     model.eval()
-    all_blocks = list(range(cfg.NUM_BLOCKS))
-    mad_accum = {b: [] for b in all_blocks}
+    all_blocks = list(range(cfg.num_blocks))
+    accum = {b: {"mad": [], "entropy": []} for b in all_blocks}
+    for tau in cfg.tau_values:
+        for b in all_blocks:
+            accum[b][f"lm_{tau}"] = []
 
-    for batch_idx, (images, _) in enumerate(val_loader):
-        if batch_idx >= num_batches:
-            break
+    for images, _ in loader:
         images = images.to(device)
         with capture_attention(model, all_blocks) as get_attn:
             _ = model(images)
             attn_dict = get_attn()
-        for bidx in all_blocks:
-            mad_accum[bidx].append(compute_mad(attn_dict[bidx], dist_matrix).cpu().numpy())
+        for b in all_blocks:
+            a = attn_dict[b]
+            accum[b]["mad"].append(compute_mad(a, dist_matrix).cpu().numpy())
+            accum[b]["entropy"].append(compute_attention_entropy(a).cpu().numpy())
+            for tau in cfg.tau_values:
+                accum[b][f"lm_{tau}"].append(
+                    compute_local_mass(a, dist_matrix, tau=tau).cpu().numpy()
+                )
 
-    return {b: np.mean(mad_accum[b], axis=0).tolist() for b in all_blocks}
+    stats = {}
+    for b in all_blocks:
+        stats[b] = {}
+        for key in accum[b]:
+            stats[b][key] = np.mean(accum[b][key], axis=0).tolist()
+    return stats
 
 
-def train_one_epoch(
-    model,
-    train_loader,
-    optimizer,
-    criterion,
-    device,
-    mixup_fn,
-    bimodal_loss_fn,
-    regularized_blocks,
-    warmup_factor,
-    scaler,
-    mode,
-):
+# ─── Training loop ───────────────────────────────────────────────────────────
+
+def train_one_epoch(model, train_loader, optimizer, criterion, device,
+                    mixup_fn, reg_fn, reg_blocks, warmup_factor, scaler, cfg):
     model.train()
-    total_task_loss = 0.0
-    total_reg_loss = 0.0
-    total_samples = 0
-    reg_info_accum = []
+    total_task = total_reg = total_samples = 0.0
+    total_grad_norm = 0.0
+    n_steps = 0
 
-    for images, targets in tqdm(train_loader, desc="Training", leave=False):
+    for images, targets in tqdm(train_loader, desc="Train", leave=False):
         images, targets = images.to(device), targets.to(device)
         if mixup_fn is not None:
             images, targets = mixup_fn(images, targets)
@@ -127,200 +143,217 @@ def train_one_epoch(
 
         reg_loss = torch.tensor(0.0, device=device)
         reg_info = {}
-        if mode == "regularized" and bimodal_loss_fn is not None:
-            attn_dict = get_cached_attn_weights(model, regularized_blocks)
+        if reg_fn is not None:
+            attn_dict = get_cached_attn_weights(model, reg_blocks)
             if attn_dict:
-                # Bimodal loss computed outside autocast for numerical stability
-                reg_loss, reg_info = bimodal_loss_fn(attn_dict, warmup_factor=warmup_factor)
-                reg_info_accum.append(reg_info)
+                reg_loss, reg_info = reg_fn(attn_dict, warmup_factor=warmup_factor)
 
-        loss = task_loss + reg_loss
+        loss = task_loss + cfg.lambda_reg * reg_loss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
 
-        clear_cached_attn_weights(model, regularized_blocks)
+        clear_cached_attn_weights(model, reg_blocks)
 
-        total_task_loss += task_loss.item() * images.size(0)
-        total_reg_loss += reg_loss.item() * images.size(0)
+        total_task += task_loss.item() * images.size(0)
+        total_reg += reg_loss.item() * images.size(0)
         total_samples += images.size(0)
+        total_grad_norm += gn.item()
+        n_steps += 1
 
-    avg_task_loss = total_task_loss / max(1, total_samples)
-    avg_reg_loss = total_reg_loss / max(1, total_samples)
-    return avg_task_loss, avg_reg_loss, reg_info_accum
+    return {
+        "train_loss": total_task / max(1, total_samples),
+        "reg_loss": total_reg / max(1, total_samples),
+        "grad_norm": total_grad_norm / max(1, n_steps),
+    }
 
+
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, required=True, choices=["baseline", "regularized"])
-    parser.add_argument("--epochs", type=int, default=cfg.EPOCHS)
-    parser.add_argument("--batch_size", type=int, default=cfg.BATCH_SIZE)
-    parser.add_argument("--lr", type=float, default=cfg.LR)
-    parser.add_argument("--data_root", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--debug", action="store_true", help="Use small subset for debugging")
-    parser.add_argument("--num_workers", type=int, default=cfg.NUM_WORKERS)
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
+    parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
 
-    device = cfg.DEVICE
-    mode = args.mode
+    cfg = load_config(args.config)
+    device = cfg.device
 
-    if args.output_dir:
-        output_dir = args.output_dir
-    elif mode == "baseline":
-        output_dir = cfg.BASELINE_FT_DIR
-    else:
-        output_dir = cfg.REGULARIZED_FT_DIR
-
+    # Output directory
+    output_dir = cfg.output_dir
+    assert output_dir, "output_dir must be set in config"
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "checkpoints"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "attention_stats"), exist_ok=True)
 
-    print(f"=" * 60)
-    print(f"Bimodal Head Specialization Experiment")
-    print(f"Mode: {mode}")
-    print(f"Device: {device}")
-    print(f"Output: {output_dir}")
-    print(f"=" * 60)
+    # Save config
+    save_config(cfg, os.path.join(output_dir, "config.yaml"))
 
-    # Save args
-    with open(os.path.join(output_dir, "args.json"), "w") as f:
-        json.dump(vars(args), f, indent=2)
+    # Log git commit
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        commit = "unknown"
+    with open(os.path.join(output_dir, "git_commit.txt"), "w") as f:
+        f.write(commit + "\n")
+
+    # Seed
+    torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.backends.cudnn.benchmark = True
+
+    print("=" * 60)
+    print(f"ViT-S/16 ImageNet-1K Training")
+    print(f"  reg_type   : {cfg.reg_type}")
+    print(f"  lambda_reg : {cfg.lambda_reg}")
+    print(f"  epochs     : {cfg.epochs}")
+    print(f"  batch_size : {cfg.batch_size}")
+    print(f"  lr         : {cfg.lr}")
+    print(f"  seed       : {cfg.seed}")
+    print(f"  output     : {output_dir}")
+    print(f"  git commit : {commit}")
+    print("=" * 60)
 
     # Model
-    print("Loading pretrained DeiT-S...")
-    model = load_deit_small(pretrained=True, device=device)
+    print("Loading pretrained ViT-S/16...")
+    model = load_vit_small(cfg, pretrained=True)
 
-    regularized_blocks = cfg.REGULARIZED_BLOCKS
-    if mode == "regularized":
-        # Patch attention forward on regularized blocks to cache attn weights with grads
-        patch_attention_forward(model, regularized_blocks, differentiable=True)
-        print(f"Patched blocks {regularized_blocks} for attention weight extraction")
-    else:
-        # For baseline, also patch so we can log MADs but without grad (won't affect training)
-        # Actually, don't patch during training for baseline — just patch during eval MAD logging
-        pass
+    # Regulariser
+    reg_blocks = cfg.regularized_blocks
+    reg_fn = build_regulariser(cfg)
+    if reg_fn is not None:
+        patch_attention_forward(model, reg_blocks, differentiable=True)
+        print(f"  Patched blocks {reg_blocks} for differentiable attention capture")
+        print(f"  Regulariser: {cfg.reg_type}, lambda={cfg.lambda_reg}")
 
     # Data
-    data_root = args.data_root or cfg.DATA_ROOT
-    if args.debug:
-        print("DEBUG MODE: using 10-class subset")
-        train_loader, val_loader = get_debug_loaders(data_root, num_classes=10, batch_size=args.batch_size)
-    else:
-        train_loader = get_train_loader(data_root, batch_size=args.batch_size, num_workers=args.num_workers)
-        val_loader = get_val_loader(data_root, batch_size=args.batch_size, num_workers=args.num_workers)
+    print(f"Loading ImageNet from {cfg.dataset_root}...")
+    train_loader = get_train_loader(cfg)
+    val_loader = get_val_loader(cfg, batch_size=max(cfg.batch_size, 256))
+    attn_eval_loader, attn_eval_indices = get_attention_eval_subset(cfg)
+    with open(os.path.join(output_dir, "attn_eval_indices.json"), "w") as f:
+        json.dump(attn_eval_indices, f)
 
     # Mixup / CutMix
     mixup_fn = Mixup(
-        mixup_alpha=cfg.MIXUP_ALPHA,
-        cutmix_alpha=cfg.CUTMIX_ALPHA,
-        prob=cfg.MIXUP_PROB,
-        switch_prob=cfg.MIXUP_SWITCH_PROB,
-        num_classes=cfg.NUM_CLASSES,
+        mixup_alpha=cfg.mixup_alpha,
+        cutmix_alpha=cfg.cutmix_alpha,
+        prob=cfg.mixup_prob,
+        switch_prob=cfg.mixup_switch_prob,
+        num_classes=cfg.num_classes,
     )
 
-    # Loss
-    criterion = nn.CrossEntropyLoss(label_smoothing=cfg.LABEL_SMOOTHING)
-    bimodal_loss_fn = BimodalHeadLoss() if mode == "regularized" else None
-
-    # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=cfg.WEIGHT_DECAY)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_epochs=5, total_epochs=args.epochs)
-
-    # AMP
+    # Loss, optimizer, scheduler
+    criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, cfg.warmup_epochs, cfg.epochs)
     scaler = GradScaler()
 
-    # Distance matrix for MAD logging
-    dist_matrix = build_distance_matrix(device=device)
+    # Distance matrix
+    dist_matrix = build_distance_matrix(cfg.grid_h, cfg.grid_w, device=device)
 
-    # Training loop
+    # Resume
+    start_epoch = 1
     best_acc1 = 0.0
     epoch_logs = []
+    if args.resume and os.path.exists(args.resume):
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_acc1 = ckpt.get("val_acc1", 0.0)
+        for _ in range(start_epoch - 1):
+            scheduler.step()
+        log_path = os.path.join(output_dir, "training_log.json")
+        if os.path.exists(log_path):
+            with open(log_path) as f:
+                epoch_logs = json.load(f)
+        print(f"  Resumed at epoch {start_epoch}, best acc1={best_acc1:.2f}%")
 
-    for epoch in range(1, args.epochs + 1):
+    # ─── Training loop ───────────────────────────────────────────────────
+    for epoch in range(start_epoch, cfg.epochs + 1):
         t0 = time.time()
-        warmup_factor = get_warmup_factor(epoch, cfg.WARMUP_EPOCHS)
+        wf = get_reg_warmup_factor(epoch, cfg.lambda_warmup_epochs)
 
-        avg_task_loss, avg_reg_loss, reg_info = train_one_epoch(
-            model=model,
-            train_loader=train_loader,
-            optimizer=optimizer,
-            criterion=criterion,
-            device=device,
-            mixup_fn=mixup_fn,
-            bimodal_loss_fn=bimodal_loss_fn,
-            regularized_blocks=regularized_blocks,
-            warmup_factor=warmup_factor,
-            scaler=scaler,
-            mode=mode,
+        train_metrics = train_one_epoch(
+            model, train_loader, optimizer, criterion, device,
+            mixup_fn, reg_fn, reg_blocks, wf, scaler, cfg,
         )
-
         scheduler.step()
-        val_acc1, val_acc5 = validate(model, val_loader, device)
-        epoch_mads = compute_epoch_mads(model, val_loader, device, dist_matrix, num_batches=5)
+
+        val_metrics = validate(model, val_loader, criterion, device)
+
+        # Attention stats
+        attn_stats = {}
+        if epoch % cfg.attention_eval_frequency_epochs == 0 or epoch == cfg.epochs:
+            attn_stats = compute_attention_stats(
+                model, attn_eval_loader, device, dist_matrix, cfg
+            )
+            stats_path = os.path.join(output_dir, "attention_stats", f"epoch_{epoch:04d}.json")
+            with open(stats_path, "w") as f:
+                json.dump(attn_stats, f, indent=2)
 
         elapsed = time.time() - t0
+        gpu_mem = torch.cuda.max_memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0
+
+        # Extract epoch-level MAD for trajectory logging
+        epoch_mads = {}
+        if attn_stats:
+            epoch_mads = {int(b): s["mad"] for b, s in attn_stats.items()}
 
         log_entry = {
             "epoch": epoch,
-            "train_loss": avg_task_loss,
-            "reg_loss": avg_reg_loss,
-            "val_acc1": val_acc1,
-            "val_acc5": val_acc5,
+            **train_metrics,
+            **val_metrics,
             "lr": optimizer.param_groups[0]["lr"],
-            "warmup_factor": warmup_factor,
-            "mads": epoch_mads,
+            "reg_warmup_factor": wf,
             "time_s": elapsed,
+            "gpu_mem_gb": round(gpu_mem, 2),
+            "mads": epoch_mads,
         }
-
-        # Log last reg info if available
-        if reg_info:
-            last_info = reg_info[-1]
-            log_entry["last_reg_info"] = {
-                k: v for k, v in last_info.items()
-                if isinstance(v, (int, float, str))
-            }
-
         epoch_logs.append(log_entry)
-
-        # Save log incrementally
         with open(os.path.join(output_dir, "training_log.json"), "w") as f:
             json.dump(epoch_logs, f, indent=2)
 
         # Checkpoint
-        is_best = val_acc1 > best_acc1
+        is_best = val_metrics["val_acc1"] > best_acc1
         if is_best:
-            best_acc1 = val_acc1
+            best_acc1 = val_metrics["val_acc1"]
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
-                "val_acc1": val_acc1,
-                "val_acc5": val_acc5,
+                "val_acc1": best_acc1,
+                "val_acc5": val_metrics["val_acc5"],
             }, os.path.join(output_dir, "checkpoints", "best.pth"))
 
-        # Print summary
-        reg_str = f"  reg_loss={avg_reg_loss:.6f}" if mode == "regularized" else ""
+        # Save every 10 epochs
+        if epoch % 10 == 0 or epoch == cfg.epochs:
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_acc1": val_metrics["val_acc1"],
+            }, os.path.join(output_dir, "checkpoints", f"epoch_{epoch:04d}.pth"))
+
+        reg_str = f" reg={train_metrics['reg_loss']:.6f}" if cfg.reg_type != "none" else ""
         best_str = " *BEST*" if is_best else ""
-        print(f"Epoch {epoch:3d}/{args.epochs} | "
-              f"task_loss={avg_task_loss:.4f}{reg_str} | "
-              f"val_acc1={val_acc1:.2f}% val_acc5={val_acc5:.2f}% | "
-              f"lr={optimizer.param_groups[0]['lr']:.2e} | "
+        print(f"Epoch {epoch:3d}/{cfg.epochs} | "
+              f"loss={train_metrics['train_loss']:.4f}{reg_str} | "
+              f"val_acc1={val_metrics['val_acc1']:.2f}% "
+              f"val_acc5={val_metrics['val_acc5']:.2f}% | "
+              f"lr={optimizer.param_groups[0]['lr']:.2e} "
+              f"gnorm={train_metrics['grad_norm']:.2f} | "
               f"{elapsed:.0f}s{best_str}")
 
-    # Save final checkpoint
-    torch.save({
-        "epoch": args.epochs,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "val_acc1": val_acc1,
-        "val_acc5": val_acc5,
-    }, os.path.join(output_dir, "checkpoints", "final.pth"))
-
     print(f"\nTraining complete. Best val_acc1: {best_acc1:.2f}%")
-    print(f"Checkpoints and logs saved to {output_dir}")
+    print(f"Output: {output_dir}")
 
 
 if __name__ == "__main__":

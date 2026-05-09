@@ -1,111 +1,119 @@
 # Bimodal Head Specialisation in Vision Transformers
 
-**Research question:** Can a pretrained DeiT-S learn stable local and global attention head roles in its early blocks through a training-time distance regulariser, without modifying inference-time architecture?
+**Research question:** Can a pretrained ViT-S/16 learn stable local and global attention head roles through a training-time distance regulariser, without modifying inference-time architecture?
 
 ## Overview
 
-This experiment investigates whether attention heads in Vision Transformers can be encouraged to specialise along a spatial-distance axis — some heads becoming "local" (attending to nearby patches) and others "global" (attending far away) — via a simple regulariser on Mean Attention Distance (MAD). The hypothesis is that such bimodal specialisation improves functional diversity and is particularly useful for dense prediction tasks like segmentation.
+This experiment investigates whether attention heads in Vision Transformers can be encouraged to specialise along a spatial-distance axis — some heads becoming "local" (attending to nearby patches) and others "global" (attending far away) — via regularisers on Mean Attention Distance (MAD). Two regulariser types are supported:
+
+1. **Spread loss**: maximise inter-head MAD variance per layer (`-Var_h(d_lh)`)
+2. **Bimodal mixture loss**: encourage each head's MAD to fit a two-component Gaussian prior
 
 ## Structure
 
 ```
 bimodal_head_specialisation/
 ├── README.md                 # This file
-├── common/                   # Shared modules used by both tasks
-│   ├── config.py             # Base configuration (DeiT-S model params, regulariser)
+├── common/                   # Shared modules
+│   ├── config.py             # YAML-based configuration system
 │   ├── attention_hooks.py    # Monkey-patching timm Attention to extract/cache weights
-│   ├── mad_metrics.py        # MAD, non-self MAD, local mass, entropy, distance histograms
-│   ├── model_utils.py        # DeiT-S loading, head masking utilities
-│   ├── bimodal_loss.py       # Gap + compactness regulariser on headwise MAD
-│   ├── boundary_utils.py     # Boundary extraction, conditional MAD, mIoU, boundary F1
+│   ├── mad_metrics.py        # MAD, local mass, entropy, distance histograms, head correlation
+│   ├── model_utils.py        # ViT-S/16 loading, head masking
+│   ├── regularisers.py       # SpreadLoss and BimodalMixtureLoss
 │   └── plot_utils.py         # All visualisation functions
-├── classification/           # Classification on Tiny-ImageNet
-│   ├── data.py               # Tiny-ImageNet / ImageFolder data loading
-│   ├── train.py              # Training loop (baseline / regularised)
-│   ├── baseline_analysis.py  # Analyse pretrained model attention patterns
-│   ├── evaluate.py           # Evaluation (GMM, persistence, masking)
-│   ├── generate_report.py    # Report generator
+├── classification/           # ImageNet-1K classification
+│   ├── configs/              # YAML config files
+│   │   ├── baseline.yaml
+│   │   ├── spread_weak.yaml
+│   │   └── bimodal_weak.yaml
+│   ├── data.py               # ImageNet-1K data loading
+│   ├── train.py              # Training loop
+│   ├── evaluate.py           # Evaluation (accuracy, attention stats, GMM)
+│   ├── visualize.py          # Generate all plots
 │   └── run_experiment.sh     # Master pipeline script
-├── segmentation/             # Segmentation on ADE20K
-│   ├── config.py             # Segmentation-specific config (overrides common)
-│   ├── data.py               # ADE20K data loading
-│   ├── model.py              # DeiT-S encoder + linear segmentation decoder
-│   ├── train.py              # Training loop (baseline / regularised)
-│   ├── evaluate.py           # Evaluation (+ boundary metrics, head norms)
-│   ├── report.py             # Report generator
-│   ├── download_ade20k.sh    # Download ADE20K dataset
-│   └── run_experiment.sh     # Master pipeline script
-├── outputs/                  # Classification results (gitignored)
-└── seg_outputs/              # Segmentation results (gitignored)
+├── segmentation/             # ADE20K segmentation (separate)
+│   └── ...
+└── runs/                     # Experiment outputs (gitignored)
+    ├── baseline_vit_s16_imagenet1k/
+    │   ├── config.yaml
+    │   ├── checkpoints/
+    │   ├── training_log.json
+    │   ├── attention_stats/
+    │   └── eval/
+    └── spread_weak_vit_s16_imagenet1k/
+        └── ...
 ```
 
-## Key Technical Details
+## Model
 
-### Attention Hook Mechanism
-timm's `Attention` class uses fused SDPA by default, which doesn't expose attention weights. We monkey-patch `Attention.forward` on targeted blocks to:
-1. Compute `attn = softmax(Q @ K^T / sqrt(d))`
-2. Cache the weights (detached for eval, with gradients for training)
-3. Proceed with standard V projection
-
-### Bimodal Loss
-For each regularised block, heads are sorted by MAD (using detached values for index selection). Bottom 3 = "local", top 3 = "global":
-- **Gap loss:** `max(0, δ - (mean_global - mean_local))` — push groups apart
-- **Compactness loss:** `Var(local) + Var(global)` — make each group tight
-- **Total:** `warmup_factor × (λ_gap × L_gap + λ_compact × L_compact)`
-
-### Segmentation Decoder
-Simple linear decoder: reshape patch tokens to spatial grid → 1×1 Conv+BN+ReLU → 1×1 Conv(→150 classes) → bilinear upsample to original resolution.
+- **ViT-S/16** (vanilla Vision Transformer, 22M params)
+- 12 layers, 6 heads, embed_dim=384, patch_size=16
+- Input: 224×224 → 14×14 = 196 patch tokens + CLS
+- Pretrained weights from timm (ImageNet-1K supervised)
 
 ## How to Run
 
-### Classification (Tiny-ImageNet)
+### Classification (ImageNet-1K)
 
 ```bash
 cd classification/
-CUDA_VISIBLE_DEVICES=2 bash run_experiment.sh
+
+# Baseline
+CUDA_VISIBLE_DEVICES=0 python train.py --config configs/baseline.yaml
+
+# Spread regulariser
+CUDA_VISIBLE_DEVICES=0 python train.py --config configs/spread_weak.yaml
+
+# Bimodal regulariser
+CUDA_VISIBLE_DEVICES=0 python train.py --config configs/bimodal_weak.yaml
+
+# Evaluate
+python evaluate.py --config configs/baseline.yaml \
+    --checkpoint runs/baseline_vit_s16_imagenet1k/checkpoints/best.pth
+
+# Visualise (compare baseline vs targeted)
+python visualize.py \
+    --baseline_results runs/baseline_vit_s16_imagenet1k/eval/evaluation_results.json \
+    --targeted_results runs/spread_weak_vit_s16_imagenet1k/eval/evaluation_results.json \
+    --baseline_log runs/baseline_vit_s16_imagenet1k/training_log.json \
+    --targeted_log runs/spread_weak_vit_s16_imagenet1k/training_log.json
+
+# Or run full pipeline:
+CUDA_VISIBLE_DEVICES=0 bash run_experiment.sh
 ```
 
-Or individual phases:
-```bash
-cd classification/
-CUDA_VISIBLE_DEVICES=2 python train.py --mode baseline --epochs 30
-CUDA_VISIBLE_DEVICES=2 python train.py --mode regularized --epochs 30
-CUDA_VISIBLE_DEVICES=2 python evaluate.py \
-    --baseline_ckpt ../outputs/baseline_ft/checkpoints/best.pth \
-    --regularized_ckpt ../outputs/regularized_ft/checkpoints/best.pth
-python generate_report.py --eval_results ../outputs/analysis/evaluation_results.json
-```
+## Metrics & Visualisations
 
-### Segmentation (ADE20K)
+### Training metrics logged per epoch
+- Train loss, val loss, top-1, top-5, learning rate, gradient norm, GPU memory
+- Regulariser loss (separate from CE)
+- Per-layer/per-head MAD values
 
-```bash
-cd segmentation/
-CUDA_VISIBLE_DEVICES=2 bash run_experiment.sh
-```
+### Attention analysis (on fixed val subset)
+- Mean Attention Distance (MAD) per layer × head
+- Local mass at τ = 0.15, 0.25, 0.35
+- Attention entropy
+- Inter-head MAD variance
+- Distance histograms
+- Head correlation matrices
 
-Or individual phases:
-```bash
-cd segmentation/
-bash download_ade20k.sh /sudarshana/data/
-CUDA_VISIBLE_DEVICES=2 python train.py --mode baseline --epochs 30
-CUDA_VISIBLE_DEVICES=2 python train.py --mode regularized --epochs 30
-CUDA_VISIBLE_DEVICES=2 python evaluate.py \
-    --baseline_ckpt ../seg_outputs/baseline_seg/checkpoints/best.pth \
-    --regularized_ckpt ../seg_outputs/regularized_seg/checkpoints/best.pth
-python report.py --eval_results ../seg_outputs/analysis/seg_evaluation_results.json
-```
+### Generated plots
+1. Training curves (loss, accuracy, LR, reg loss)
+2. MAD heatmaps (baseline, targeted, difference)
+3. MAD distributions by layer
+4. Headwise MAD trajectories over training
+5. Inter-head MAD variance by layer
+6. Local mass heatmaps per τ
+7. Entropy heatmaps
+8. Attention distance histograms
+9. Bimodality diagnostics (histogram + GMM AIC/BIC)
+10. Summary table (CSV + markdown)
 
-## Results
+## Fairness Requirements
 
-### Classification (Tiny-ImageNet) — COMPLETED
-
-| Model | Val Top-1 | Mask Local | Mask Global | Mask Random |
-|-------|----------:|----------:|----------:|----------:|
-| Baseline | 86.38% | 9.36% | 11.98% | 38.21% |
-| Regularised | 86.43% | 8.88% | 14.53% | 37.40% |
-
-**Conclusion:** The regulariser had minimal effect on Tiny-ImageNet. Head roles were already perfectly stable in the baseline. The task is too easy/small to reveal meaningful specialisation differences.
-
-### Segmentation (ADE20K) — IN PROGRESS
-
-Baseline training reached 12/30 epochs (mIoU 0.3747, boundary F1 0.2486) before process instability. Regularised phase not yet started.
+All runs use identical:
+- Random seed, data split, preprocessing
+- Training schedule (cosine LR with warmup)
+- Augmentation (RandAugment + Mixup/CutMix)
+- Batch size, optimizer (AdamW), weight decay
+- Git commit hash logged per run

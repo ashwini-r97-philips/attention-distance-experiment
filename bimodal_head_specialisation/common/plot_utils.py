@@ -1,130 +1,120 @@
-"""Visualization utilities for the bimodal head specialization experiment."""
+"""Visualisation utilities for attention-distance experiments."""
 
 import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 
-def plot_mad_heatmap(mad_dict, save_path, title="Mean Attention Distance by Layer × Head"):
-    """Plot layer × head heatmap of MAD values.
+def _ensure_dir(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+
+# ─── 1. Training curves ─────────────────────────────────────────────────────
+
+def plot_training_curves(logs, save_path, title_prefix=""):
+    """Plot train loss, val loss, top-1, top-5, lr, and reg loss vs epoch."""
+    _ensure_dir(save_path)
+    epochs = [e["epoch"] for e in logs]
+
+    has_reg = any(e.get("reg_loss", 0) > 0 for e in logs)
+    ncols = 6 if has_reg else 5
+    fig, axes = plt.subplots(1, ncols, figsize=(4.5 * ncols, 4))
+
+    def _plot(ax, key, label, color="b"):
+        vals = [e.get(key, 0) for e in logs]
+        ax.plot(epochs, vals, f"{color}-", linewidth=1.2)
+        ax.set_xlabel("Epoch")
+        ax.set_title(label)
+        ax.grid(True, alpha=0.3)
+
+    _plot(axes[0], "train_loss", f"{title_prefix}Train Loss")
+    _plot(axes[1], "val_loss", f"{title_prefix}Val Loss", "r")
+    _plot(axes[2], "val_acc1", f"{title_prefix}Top-1 %", "g")
+    _plot(axes[3], "val_acc5", f"{title_prefix}Top-5 %", "m")
+    _plot(axes[4], "lr", f"{title_prefix}Learning Rate", "orange")
+    if has_reg:
+        _plot(axes[5], "reg_loss", f"{title_prefix}Reg Loss", "purple")
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+# ─── 2. MAD heatmap ─────────────────────────────────────────────────────────
+
+def plot_mad_heatmap(mad_dict, save_path, title="MAD by Layer × Head"):
+    """Layer × head heatmap of MAD values.
 
     Args:
         mad_dict: {block_idx: np.array of shape (num_heads,)}
-        save_path: path to save the figure
-        title: figure title
     """
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    block_indices = sorted(mad_dict.keys())
-    num_blocks = len(block_indices)
+    _ensure_dir(save_path)
+    blocks = sorted(mad_dict.keys())
+    num_blocks = len(blocks)
     num_heads = len(next(iter(mad_dict.values())))
 
     data = np.zeros((num_blocks, num_heads))
-    for i, bidx in enumerate(block_indices):
-        data[i] = mad_dict[bidx]
+    for i, b in enumerate(blocks):
+        data[i] = mad_dict[b]
 
     fig, ax = plt.subplots(figsize=(max(8, num_heads), max(6, num_blocks * 0.6)))
     im = ax.imshow(data, aspect="auto", cmap="RdYlBu_r")
     ax.set_xticks(range(num_heads))
     ax.set_xticklabels([f"H{h}" for h in range(num_heads)])
     ax.set_yticks(range(num_blocks))
-    ax.set_yticklabels([f"Block {bidx}" for bidx in block_indices])
+    ax.set_yticklabels([f"L{b}" for b in blocks])
     ax.set_xlabel("Head")
-    ax.set_ylabel("Block")
+    ax.set_ylabel("Layer")
     ax.set_title(title)
-
-    # Add text annotations
     for i in range(num_blocks):
         for j in range(num_heads):
-            ax.text(j, i, f"{data[i, j]:.3f}", ha="center", va="center", fontsize=8,
+            ax.text(j, i, f"{data[i, j]:.3f}", ha="center", va="center", fontsize=7,
                     color="white" if data[i, j] > data.mean() else "black")
-
     plt.colorbar(im, ax=ax, label="MAD")
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def plot_mad_violins(mad_per_image_dict, save_path, block_indices=None, title="MAD Distribution per Block"):
-    """Violin plot of head MADs across images for each block.
+def plot_comparison_heatmaps(base_mad, tgt_mad, save_path,
+                             title_a="Baseline", title_b="Targeted"):
+    """Side-by-side MAD heatmaps + difference."""
+    _ensure_dir(save_path)
+    blocks = sorted(set(base_mad.keys()) & set(tgt_mad.keys()))
+    num_blocks = len(blocks)
+    num_heads = len(next(iter(base_mad.values())))
 
-    Args:
-        mad_per_image_dict: {block_idx: np.array of shape (num_images, num_heads)}
-        save_path: path to save
-        block_indices: which blocks to plot (default: all)
-    """
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    if block_indices is None:
-        block_indices = sorted(mad_per_image_dict.keys())
+    data_b = np.array([base_mad[b] for b in blocks])
+    data_t = np.array([tgt_mad[b] for b in blocks])
 
-    n_blocks = len(block_indices)
-    fig, axes = plt.subplots(1, n_blocks, figsize=(3 * n_blocks, 5), sharey=True)
-    if n_blocks == 1:
-        axes = [axes]
-
-    for ax, bidx in zip(axes, block_indices):
-        data = mad_per_image_dict[bidx]  # (num_images, num_heads)
-        num_heads = data.shape[1]
-        parts = ax.violinplot([data[:, h] for h in range(num_heads)],
-                              positions=range(num_heads), showmeans=True, showmedians=True)
-        ax.set_title(f"Block {bidx}")
-        ax.set_xlabel("Head")
-        ax.set_xticks(range(num_heads))
-        ax.set_xticklabels([f"H{h}" for h in range(num_heads)])
-        if ax == axes[0]:
-            ax.set_ylabel("MAD")
-
-    fig.suptitle(title)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-
-
-def plot_comparison_heatmaps(baseline_mad, regularized_mad, save_path):
-    """Side-by-side MAD heatmaps for baseline vs regularized."""
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    block_indices = sorted(set(baseline_mad.keys()) & set(regularized_mad.keys()))
-    num_blocks = len(block_indices)
-    num_heads = len(next(iter(baseline_mad.values())))
-
-    data_b = np.zeros((num_blocks, num_heads))
-    data_r = np.zeros((num_blocks, num_heads))
-    for i, bidx in enumerate(block_indices):
-        data_b[i] = baseline_mad[bidx]
-        data_r[i] = regularized_mad[bidx]
-
-    vmin = min(data_b.min(), data_r.min())
-    vmax = max(data_b.max(), data_r.max())
+    vmin = min(data_b.min(), data_t.min())
+    vmax = max(data_b.max(), data_t.max())
 
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, max(6, num_blocks * 0.6)),
                                          gridspec_kw={"width_ratios": [1, 1, 1]})
-
-    for ax, data, title in [(ax1, data_b, "Baseline FT"), (ax2, data_r, "Regularized FT")]:
+    for ax, data, title in [(ax1, data_b, title_a), (ax2, data_t, title_b)]:
         im = ax.imshow(data, aspect="auto", cmap="RdYlBu_r", vmin=vmin, vmax=vmax)
         ax.set_xticks(range(num_heads))
         ax.set_xticklabels([f"H{h}" for h in range(num_heads)])
         ax.set_yticks(range(num_blocks))
-        ax.set_yticklabels([f"Block {bidx}" for bidx in block_indices])
-        ax.set_xlabel("Head")
-        ax.set_ylabel("Block")
-        ax.set_title(title)
+        ax.set_yticklabels([f"L{b}" for b in blocks])
+        ax.set_xlabel("Head"); ax.set_ylabel("Layer"); ax.set_title(title)
         for i in range(num_blocks):
             for j in range(num_heads):
                 ax.text(j, i, f"{data[i, j]:.3f}", ha="center", va="center", fontsize=7,
                         color="white" if data[i, j] > (vmin + vmax) / 2 else "black")
 
-    # Difference heatmap
-    diff = data_r - data_b
-    im3 = ax3.imshow(diff, aspect="auto", cmap="RdBu_r", vmin=-abs(diff).max(), vmax=abs(diff).max())
+    diff = data_t - data_b
+    im3 = ax3.imshow(diff, aspect="auto", cmap="RdBu_r",
+                     vmin=-abs(diff).max(), vmax=abs(diff).max())
     ax3.set_xticks(range(num_heads))
     ax3.set_xticklabels([f"H{h}" for h in range(num_heads)])
     ax3.set_yticks(range(num_blocks))
-    ax3.set_yticklabels([f"Block {bidx}" for bidx in block_indices])
-    ax3.set_xlabel("Head")
-    ax3.set_ylabel("Block")
-    ax3.set_title("Difference (Reg − Base)")
+    ax3.set_yticklabels([f"L{b}" for b in blocks])
+    ax3.set_xlabel("Head"); ax3.set_ylabel("Layer")
+    ax3.set_title(f"Δ ({title_b} − {title_a})")
     for i in range(num_blocks):
         for j in range(num_heads):
             ax3.text(j, i, f"{diff[i, j]:+.3f}", ha="center", va="center", fontsize=7)
@@ -136,215 +126,244 @@ def plot_comparison_heatmaps(baseline_mad, regularized_mad, save_path):
     plt.close()
 
 
-def plot_training_curves(log_path, save_path):
-    """Plot training curves from a JSON log file."""
-    import json
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+# ─── 3. MAD distribution by layer ───────────────────────────────────────────
 
-    with open(log_path) as f:
-        logs = json.load(f)
-
-    epochs = [e["epoch"] for e in logs]
-    train_loss = [e["train_loss"] for e in logs]
-    val_acc1 = [e["val_acc1"] for e in logs]
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-    ax1.plot(epochs, train_loss, "b-o", markersize=3)
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Train Loss")
-    ax1.set_title("Training Loss")
-    ax1.grid(True, alpha=0.3)
-
-    ax2.plot(epochs, val_acc1, "r-o", markersize=3)
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Val Top-1 (%)")
-    ax2.set_title("Validation Accuracy")
-    ax2.grid(True, alpha=0.3)
-
+def plot_mad_distributions(base_mad, tgt_mad, save_path, blocks=None):
+    """Per-layer histogram of headwise MAD: baseline vs targeted."""
+    _ensure_dir(save_path)
+    if blocks is None:
+        blocks = sorted(set(base_mad.keys()) & set(tgt_mad.keys()))
+    n = len(blocks)
+    fig, axes = plt.subplots(1, n, figsize=(3 * n, 4), sharey=True)
+    if n == 1:
+        axes = [axes]
+    for ax, b in zip(axes, blocks):
+        bv = np.array(base_mad[b])
+        tv = np.array(tgt_mad[b])
+        bins = np.linspace(0, 1, 20)
+        ax.hist(bv, bins=bins, alpha=0.5, label="Baseline", color="steelblue")
+        ax.hist(tv, bins=bins, alpha=0.5, label="Targeted", color="coral")
+        ax.set_title(f"Layer {b}")
+        ax.set_xlabel("MAD")
+        ax.legend(fontsize=7)
+    axes[0].set_ylabel("Count")
+    fig.suptitle("Head MAD Distribution by Layer", fontsize=13)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def plot_head_masking_results(results, save_path):
-    """Bar chart of accuracy drops under different head masking strategies.
+# ─── 4. Headwise MAD trajectory over training ───────────────────────────────
+
+def plot_mad_trajectories(epoch_mads, save_path, layers=None, title_prefix=""):
+    """Plot per-head MAD over epochs for selected layers.
 
     Args:
-        results: dict with keys 'no_mask', 'mask_local', 'mask_global', 'mask_random'
-                 each mapping to accuracy values.
+        epoch_mads: list of dicts, each {layer_idx: [h0, h1, ...]}
     """
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    labels = ["No Mask", "Mask Local", "Mask Global", "Mask Random"]
-    baseline_vals = [results["baseline"][k] for k in ["no_mask", "mask_local", "mask_global", "mask_random"]]
-    reg_vals = [results["regularized"][k] for k in ["no_mask", "mask_local", "mask_global", "mask_random"]]
+    _ensure_dir(save_path)
+    all_layers = sorted(epoch_mads[0].keys()) if epoch_mads else []
+    if layers is None:
+        layers = all_layers[:4] + all_layers[-2:]  # early + late
+        layers = sorted(set(layers))
+    n = len(layers)
+    if n == 0:
+        return
 
-    x = np.arange(len(labels))
-    width = 0.35
+    epochs = list(range(1, len(epoch_mads) + 1))
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), sharey=True)
+    if n == 1:
+        axes = [axes]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    bars1 = ax.bar(x - width / 2, baseline_vals, width, label="Baseline FT", color="steelblue")
-    bars2 = ax.bar(x + width / 2, reg_vals, width, label="Regularized FT", color="coral")
+    for ax, layer in zip(axes, layers):
+        num_heads = len(epoch_mads[0][layer])
+        for h in range(num_heads):
+            vals = [epoch_mads[e][layer][h] for e in range(len(epoch_mads))]
+            ax.plot(epochs, vals, label=f"H{h}", linewidth=1)
+        ax.set_title(f"{title_prefix}Layer {layer}")
+        ax.set_xlabel("Epoch")
+        ax.legend(fontsize=7, ncol=2)
+        ax.grid(True, alpha=0.3)
+    axes[0].set_ylabel("MAD")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
-    ax.set_ylabel("Val Top-1 (%)")
-    ax.set_title("Head Masking Experiment")
+
+# ─── 5. Inter-head MAD variance by layer ────────────────────────────────────
+
+def plot_mad_variance(base_mad, tgt_mad, save_path):
+    """Bar chart: Var_h(MAD) per layer, baseline vs targeted."""
+    _ensure_dir(save_path)
+    blocks = sorted(set(base_mad.keys()) & set(tgt_mad.keys()))
+    b_var = [np.var(base_mad[b]) for b in blocks]
+    t_var = [np.var(tgt_mad[b]) for b in blocks]
+    x = np.arange(len(blocks))
+    w = 0.35
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.bar(x - w / 2, b_var, w, label="Baseline", color="steelblue")
+    ax.bar(x + w / 2, t_var, w, label="Targeted", color="coral")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels([f"L{b}" for b in blocks])
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Var(MAD)")
+    ax.set_title("Inter-Head MAD Variance by Layer")
     ax.legend()
     ax.grid(True, alpha=0.3, axis="y")
-
-    # Add value labels
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            height = bar.get_height()
-            ax.annotate(f"{height:.1f}", xy=(bar.get_x() + bar.get_width() / 2, height),
-                        xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=9)
-
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-# ─── Segmentation-Specific Visualizations ────────────────────────────────────
+# ─── 6. Local mass heatmaps ─────────────────────────────────────────────────
 
-def plot_seg_training_curves(log_path, save_path):
-    """Plot training curves: loss, mIoU, boundary F1, regularizer loss."""
-    import json
-    with open(log_path) as f:
-        logs = json.load(f)
-
-    epochs = [l["epoch"] for l in logs]
-    task_loss = [l["train_loss"] for l in logs]
-    miou = [l["val_miou"] for l in logs]
-    bf1 = [l["val_boundary_f1"] for l in logs]
-    has_reg = any(l.get("reg_loss", 0) > 0 for l in logs)
-
-    ncols = 4 if has_reg else 3
-    fig, axes = plt.subplots(1, ncols, figsize=(5 * ncols, 4))
-
-    axes[0].plot(epochs, task_loss, "b-")
-    axes[0].set_title("Task Loss")
-    axes[0].set_xlabel("Epoch")
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(epochs, miou, "g-")
-    axes[1].set_title("Val mIoU")
-    axes[1].set_xlabel("Epoch")
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(epochs, bf1, "r-")
-    axes[2].set_title("Val Boundary F1")
-    axes[2].set_xlabel("Epoch")
-    axes[2].grid(True, alpha=0.3)
-
-    if has_reg:
-        reg_loss = [l.get("reg_loss", 0) for l in logs]
-        axes[3].plot(epochs, reg_loss, "m-")
-        axes[3].set_title("Regularizer Loss")
-        axes[3].set_xlabel("Epoch")
-        axes[3].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
+def plot_local_mass_heatmaps(base_lm, tgt_lm, tau, save_path):
+    """Side-by-side local-mass heatmaps for a given tau."""
+    plot_comparison_heatmaps(
+        base_lm, tgt_lm, save_path,
+        title_a=f"Baseline (τ={tau})", title_b=f"Targeted (τ={tau})",
+    )
 
 
-def plot_seg_head_masking(baseline_masking, regularized_masking, save_path):
-    """Bar chart: mIoU and boundary F1 under different masking conditions."""
-    conditions = ["no_mask", "mask_local", "mask_global", "mask_random"]
-    labels = ["No Mask", "Mask Local", "Mask Global", "Mask Random"]
+# ─── 7. Entropy heatmap ─────────────────────────────────────────────────────
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    x = np.arange(len(conditions))
-    w = 0.35
-
-    for ax, metric, title in [
-        (axes[0], "miou", "mIoU"),
-        (axes[1], "boundary_f1", "Boundary F1"),
-    ]:
-        base_vals = [baseline_masking[c][metric] for c in conditions]
-        reg_vals = [regularized_masking[c][metric] for c in conditions]
-        b1 = ax.bar(x - w / 2, base_vals, w, label="Baseline", color="steelblue")
-        b2 = ax.bar(x + w / 2, reg_vals, w, label="Regularized", color="coral")
-        ax.set_title(f"Head Masking: {title}")
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=15)
-        ax.legend()
-        ax.grid(True, alpha=0.3, axis="y")
-        for bars in [b1, b2]:
-            for bar in bars:
-                h = bar.get_height()
-                ax.annotate(f"{h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, h),
-                            xytext=(0, 3), textcoords="offset points",
-                            ha="center", va="bottom", fontsize=8)
-
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
+def plot_entropy_heatmap(base_ent, tgt_ent, save_path):
+    plot_comparison_heatmaps(
+        base_ent, tgt_ent, save_path,
+        title_a="Baseline Entropy", title_b="Targeted Entropy",
+    )
 
 
-def plot_distance_histograms(base_hist, reg_hist, block_idx, save_path):
-    """Side-by-side distance histograms for each head in a block.
+# ─── 8. Distance histogram ──────────────────────────────────────────────────
 
-    Args:
-        base_hist: (num_heads, num_bins) array for baseline
-        reg_hist: (num_heads, num_bins) for regularized
-        block_idx: block index (for title)
-    """
+def plot_distance_histograms(base_hist, tgt_hist, block_idx, save_path):
+    """Per-head distance histogram for one layer."""
+    _ensure_dir(save_path)
     num_heads = base_hist.shape[0]
     num_bins = base_hist.shape[1]
     fig, axes = plt.subplots(2, num_heads, figsize=(3 * num_heads, 6), sharey=True)
-    bin_centers = np.arange(num_bins)
-
+    bins = np.arange(num_bins)
     for h in range(num_heads):
-        axes[0, h].bar(bin_centers, base_hist[h], color="steelblue", alpha=0.8)
-        axes[0, h].set_title(f"Head {h}")
+        axes[0, h].bar(bins, base_hist[h], color="steelblue", alpha=0.8)
+        axes[0, h].set_title(f"H{h}")
         if h == 0:
             axes[0, h].set_ylabel("Baseline")
-
-        axes[1, h].bar(bin_centers, reg_hist[h], color="coral", alpha=0.8)
+        axes[1, h].bar(bins, tgt_hist[h], color="coral", alpha=0.8)
         if h == 0:
-            axes[1, h].set_ylabel("Regularized")
-        axes[1, h].set_xlabel("Dist. bin")
-
-    fig.suptitle(f"Attention Distance Histograms — Block {block_idx}", fontsize=14)
+            axes[1, h].set_ylabel("Targeted")
+        axes[1, h].set_xlabel("Dist bin")
+    fig.suptitle(f"Attention Distance Histograms — Layer {block_idx}", fontsize=13)
     plt.tight_layout()
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
 
 
-def plot_conditional_mad(baseline_cond, regularized_cond, save_path):
-    """Grouped bar chart: boundary vs interior MAD per head, baseline vs regularized."""
-    blocks = sorted([int(k) for k in baseline_cond.keys()])
-    num_heads = len(baseline_cond[str(blocks[0])]["boundary_mad"])
+# ─── 9. Attention map visualisation ─────────────────────────────────────────
 
-    fig, axes = plt.subplots(len(blocks), 1, figsize=(10, 3.5 * len(blocks)))
-    if len(blocks) == 1:
-        axes = [axes]
+def plot_attention_maps(images, attn_maps, query_patches, head_labels,
+                        save_path, grid_h=14, grid_w=14):
+    """Visualise attention maps for selected query patches.
 
-    for ax, bidx in zip(axes, blocks):
-        bb = np.array(baseline_cond[str(bidx)]["boundary_mad"])
-        bi = np.array(baseline_cond[str(bidx)]["interior_mad"])
-        rb = np.array(regularized_cond[str(bidx)]["boundary_mad"])
-        ri = np.array(regularized_cond[str(bidx)]["interior_mad"])
+    Args:
+        images: list of (C, H, W) tensors (unnormalised for display).
+        attn_maps: list of (H_heads, N, N) arrays (patch-only attention).
+        query_patches: list of patch indices.
+        head_labels: list of (head_idx, layer_name) tuples to display.
+        grid_h, grid_w: patch grid dims.
+    """
+    _ensure_dir(save_path)
+    n_imgs = len(images)
+    n_heads = len(head_labels)
+    n_queries = len(query_patches)
+    fig, axes = plt.subplots(n_imgs, n_heads * n_queries + 1,
+                             figsize=(2.5 * (n_heads * n_queries + 1), 2.5 * n_imgs))
+    if n_imgs == 1:
+        axes = axes[np.newaxis, :]
 
-        x = np.arange(num_heads)
-        w = 0.2
-        ax.bar(x - 1.5 * w, bb, w, label="Base boundary", color="steelblue")
-        ax.bar(x - 0.5 * w, bi, w, label="Base interior", color="lightblue")
-        ax.bar(x + 0.5 * w, rb, w, label="Reg boundary", color="coral")
-        ax.bar(x + 1.5 * w, ri, w, label="Reg interior", color="lightsalmon")
-        ax.set_title(f"Block {bidx}: Boundary vs Interior MAD")
-        ax.set_xlabel("Head")
-        ax.set_ylabel("MAD")
-        ax.set_xticks(x)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3, axis="y")
+    for img_idx in range(n_imgs):
+        img = images[img_idx]
+        if hasattr(img, "numpy"):
+            img = img.numpy()
+        if img.shape[0] == 3:
+            img = img.transpose(1, 2, 0)
+        img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+        axes[img_idx, 0].imshow(img)
+        axes[img_idx, 0].set_title("Input", fontsize=8)
+        axes[img_idx, 0].axis("off")
+
+        col = 1
+        for q in query_patches:
+            for hi, (head_idx, lbl) in enumerate(head_labels):
+                attn = attn_maps[img_idx][head_idx]  # (N, N)
+                attn_q = attn[q].reshape(grid_h, grid_w)
+                axes[img_idx, col].imshow(attn_q, cmap="hot", vmin=0)
+                axes[img_idx, col].set_title(f"{lbl} q={q}", fontsize=6)
+                axes[img_idx, col].axis("off")
+                col += 1
 
     plt.tight_layout()
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
+
+
+# ─── 11. Bimodality diagnostics ─────────────────────────────────────────────
+
+def plot_bimodality_histogram(all_mads, save_path, title="MAD Distribution"):
+    """Histogram of all d_lh values, optionally split by layer group."""
+    _ensure_dir(save_path)
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+    bins = np.linspace(0, 1, 30)
+
+    # All
+    axes[0].hist(all_mads, bins=bins, color="steelblue", alpha=0.8)
+    axes[0].set_title("All Layers")
+    axes[0].set_xlabel("MAD")
+
+    n = len(all_mads)
+    num_heads = 6  # default
+    num_layers = n // num_heads if num_heads > 0 else 12
+    third = num_layers // 3
+
+    early = all_mads[:third * num_heads]
+    mid = all_mads[third * num_heads:2 * third * num_heads]
+    late = all_mads[2 * third * num_heads:]
+
+    for ax, data, lbl in [(axes[1], early, "Early"), (axes[2], mid, "Mid"), (axes[3], late, "Late")]:
+        if len(data) > 0:
+            ax.hist(data, bins=bins, color="coral", alpha=0.8)
+        ax.set_title(lbl)
+        ax.set_xlabel("MAD")
+
+    fig.suptitle(title, fontsize=13)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+# ─── 12. Summary table ──────────────────────────────────────────────────────
+
+def save_summary_table(baseline_stats, targeted_stats, save_dir):
+    """Save CSV and markdown comparison table."""
+    _ensure_dir(os.path.join(save_dir, "dummy"))
+    rows = []
+    for key in ["top1", "top5", "mean_mad", "mean_mad_variance",
+                "mean_local_mass_0.15", "mean_local_mass_0.25", "mean_local_mass_0.35",
+                "mean_entropy"]:
+        bv = baseline_stats.get(key, "—")
+        tv = targeted_stats.get(key, "—")
+        rows.append((key, bv, tv))
+
+    # CSV
+    csv_path = os.path.join(save_dir, "summary.csv")
+    with open(csv_path, "w") as f:
+        f.write("metric,baseline,targeted\n")
+        for k, bv, tv in rows:
+            f.write(f"{k},{bv},{tv}\n")
+
+    # Markdown
+    md_path = os.path.join(save_dir, "summary.md")
+    with open(md_path, "w") as f:
+        f.write("| Metric | Baseline | Targeted |\n")
+        f.write("|--------|--------:|--------:|\n")
+        for k, bv, tv in rows:
+            f.write(f"| {k} | {bv} | {tv} |\n")

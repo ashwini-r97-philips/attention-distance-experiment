@@ -1,0 +1,23 @@
+# Baseline: ViT-S/16 ImageNet-1K finetuning, CE loss only
+model_name: vit_small_patch16_224
+dataset_root: /sudarshana/data/imagenet
+output_dir: runs/baseline_vit_s16_imagenet1k
+
+num_classes: 1000
+epochs: 90
+batch_size: 256
+lr: 1e-4
+weight_decay: 0.05
+warmup_epochs: 5
+label_smoothing: 0.1
+mixup_alpha: 0.8
+cutmix_alpha: 1.0
+seed: 42
+num_workers: 8
+
+reg_type: none
+lambda_reg: 0.0
+
+attention_eval_subset_size: 1024
+attention_eval_frequency_epochs: 1
+attention_map_frequency_epochs: 5

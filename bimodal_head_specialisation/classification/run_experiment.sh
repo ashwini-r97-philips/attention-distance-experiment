@@ -1,91 +1,71 @@
 #!/usr/bin/env bash
-# Master script for the bimodal head specialization experiment.
-# Usage: CUDA_VISIBLE_DEVICES=2 bash run_experiment.sh [--debug] [--data_root /path/to/imagenet]
+# Run baseline + targeted experiments and generate visualisations.
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 bash run_experiment.sh
+#   CUDA_VISIBLE_DEVICES=0 bash run_experiment.sh --config configs/baseline.yaml
 #
 # Phases:
-#   1. Baseline analysis (pretrained, no training)
-#   2. Baseline finetuning (30 epochs)
-#   3. Regularized finetuning (30 epochs)
-#   4. Post-training evaluation
-#   5. Report generation
-
+#   1. Baseline training
+#   2. Targeted training (spread or bimodal)
+#   3. Evaluation of both
+#   4. Visualisation generation
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Defaults
-DATA_ROOT="${DATA_ROOT:-$HOME/datasets/imagenet-1k}"
-DEBUG=""
-EPOCHS=30
-BATCH_SIZE=256
-
-# Parse args
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --debug) DEBUG="--debug"; EPOCHS=3; BATCH_SIZE=64; shift ;;
-        --data_root) DATA_ROOT="$2"; shift 2 ;;
-        --epochs) EPOCHS="$2"; shift 2 ;;
-        --batch_size) BATCH_SIZE="$2"; shift 2 ;;
-        *) echo "Unknown argument: $1"; exit 1 ;;
-    esac
-done
+BASELINE_CONFIG="${BASELINE_CONFIG:-configs/baseline.yaml}"
+TARGETED_CONFIG="${TARGETED_CONFIG:-configs/spread_weak.yaml}"
 
 echo "=============================================="
-echo "Bimodal Head Specialization Experiment"
+echo "ViT-S/16 ImageNet-1K Attention Distance Experiment"
 echo "=============================================="
-echo "Data root:  $DATA_ROOT"
-echo "Epochs:     $EPOCHS"
-echo "Batch size: $BATCH_SIZE"
-echo "Debug:      ${DEBUG:-no}"
-echo "Device:     CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-not set}"
+echo "Baseline config : $BASELINE_CONFIG"
+echo "Targeted config : $TARGETED_CONFIG"
+echo "Device          : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-not set}"
 echo "=============================================="
 
-# Phase 1: Baseline analysis
+# Phase 1: Baseline
 echo ""
-echo "[Phase 1] Baseline analysis of pretrained DeiT-S..."
-python baseline_analysis.py \
-    --data_root "$DATA_ROOT" \
-    --batch_size 64 \
-    --num_batches 50
+echo "[Phase 1] Baseline training..."
+python train.py --config "$BASELINE_CONFIG"
 
-# Phase 2: Baseline finetuning
+# Phase 2: Targeted
 echo ""
-echo "[Phase 2] Baseline finetuning..."
-python train.py \
-    --mode baseline \
-    --epochs "$EPOCHS" \
-    --batch_size "$BATCH_SIZE" \
-    --data_root "$DATA_ROOT" \
-    $DEBUG
+echo "[Phase 2] Targeted training..."
+python train.py --config "$TARGETED_CONFIG"
 
-# Phase 3: Regularized finetuning
+# Phase 3: Evaluate baseline
 echo ""
-echo "[Phase 3] Regularized finetuning..."
-python train.py \
-    --mode regularized \
-    --epochs "$EPOCHS" \
-    --batch_size "$BATCH_SIZE" \
-    --data_root "$DATA_ROOT" \
-    $DEBUG
-
-# Phase 4: Evaluation
-echo ""
-echo "[Phase 4] Post-training evaluation..."
+echo "[Phase 3a] Evaluating baseline..."
+BASELINE_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$BASELINE_CONFIG'))['output_dir'])")
 python evaluate.py \
-    --baseline_ckpt ../outputs/baseline_ft/checkpoints/best.pth \
-    --regularized_ckpt ../outputs/regularized_ft/checkpoints/best.pth \
-    --data_root "$DATA_ROOT" \
-    --batch_size 64
+    --config "$BASELINE_CONFIG" \
+    --checkpoint "$BASELINE_DIR/checkpoints/best.pth"
 
-# Phase 5: Report
+# Evaluate targeted
 echo ""
-echo "[Phase 5] Generating report..."
-python generate_report.py \
-    --eval_results ../outputs/analysis/evaluation_results.json
+echo "[Phase 3b] Evaluating targeted..."
+TARGETED_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$TARGETED_CONFIG'))['output_dir'])")
+python evaluate.py \
+    --config "$TARGETED_CONFIG" \
+    --checkpoint "$TARGETED_DIR/checkpoints/best.pth"
+
+# Phase 4: Visualisations
+echo ""
+echo "[Phase 4] Generating visualisations..."
+python visualize.py \
+    --baseline_results "$BASELINE_DIR/eval/evaluation_results.json" \
+    --targeted_results "$TARGETED_DIR/eval/evaluation_results.json" \
+    --baseline_log "$BASELINE_DIR/training_log.json" \
+    --targeted_log "$TARGETED_DIR/training_log.json" \
+    --output_dir visualizations/
 
 echo ""
 echo "=============================================="
 echo "Experiment complete!"
-echo "Report: ../outputs/report/report.md"
+echo "  Baseline:  $BASELINE_DIR/"
+echo "  Targeted:  $TARGETED_DIR/"
+echo "  Plots:     visualizations/"
 echo "=============================================="
