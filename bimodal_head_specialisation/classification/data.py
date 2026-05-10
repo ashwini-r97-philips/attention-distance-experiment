@@ -167,4 +167,4 @@ def get_attention_eval_subset(cfg):
         num_workers=min(cfg.num_workers, 4),
         pin_memory=True,
     )
-    return loader, sorted(target_indices)
+    return loader, [int(i) for i in sorted(target_indices)]
