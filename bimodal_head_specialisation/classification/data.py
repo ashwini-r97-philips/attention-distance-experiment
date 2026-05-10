@@ -49,6 +49,10 @@ class HFStreamingDataset(IterableDataset):
 
     Each example is expected to have an 'image' (PIL) and 'label' (int) field.
     Images are converted to RGB and transformed on the fly.
+
+    Worker sharding: ImageNet on HF has 294 train Parquet shards. We split
+    shards across DataLoader workers so each worker downloads only its
+    fraction of the data (no duplicated network traffic).
     """
 
     def __init__(self, hf_dataset, transform, seed=42, shuffle_buffer=10_000):
@@ -59,15 +63,19 @@ class HFStreamingDataset(IterableDataset):
         self.shuffle_buffer = shuffle_buffer
 
     def __iter__(self):
-        # Shuffle with a buffer for training; no-ops for val (buffer=0)
         ds = self.hf_dataset
+
+        # Shard across DataLoader workers at the file/shard level
+        # so each worker streams only its own Parquet files.
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None and worker_info.num_workers > 1:
+            ds = ds.shard(
+                num_shards=worker_info.num_workers,
+                index=worker_info.id,
+            )
+
         if self.shuffle_buffer > 0:
             ds = ds.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
-
-        worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            # Split the stream across DataLoader workers
-            ds = _split_iterable_for_worker(ds, worker_info)
 
         for example in ds:
             img = example["image"]
@@ -75,15 +83,6 @@ class HFStreamingDataset(IterableDataset):
                 img = img.convert("RGB")
             label = example["label"]
             yield self.transform(img), label
-
-
-def _split_iterable_for_worker(ds, worker_info):
-    """Yield every n-th example so workers don't duplicate data."""
-    worker_id = worker_info.id
-    num_workers = worker_info.num_workers
-    for i, item in enumerate(ds):
-        if i % num_workers == worker_id:
-            yield item
 
 
 class HFMapDataset(Dataset):
@@ -112,22 +111,34 @@ def _hf_name(cfg):
 
 def get_train_loader(cfg):
     ds = load_dataset(_hf_name(cfg), split="train", streaming=True)
+    # Cap workers for streaming — beyond 4-8 there's diminishing returns
+    # since bottleneck is network, not CPU decode
+    nw = min(cfg.num_workers, 8)
     wrapped = HFStreamingDataset(ds, build_train_transform(cfg),
                                   seed=cfg.seed, shuffle_buffer=10_000)
     return DataLoader(
         wrapped,
         batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers,
+        num_workers=nw,
         pin_memory=True,
         drop_last=True,
-        # IterableDataset: shuffle is handled inside the dataset
+        prefetch_factor=4 if nw > 0 else None,
     )
 
 
 def get_val_loader(cfg, batch_size=None):
     ds = load_dataset(_hf_name(cfg), split="validation", streaming=True)
+    nw = min(cfg.num_workers, 8)
     wrapped = HFStreamingDataset(ds, build_val_transform(cfg),
                                   seed=cfg.seed, shuffle_buffer=0)
+    return DataLoader(
+        wrapped,
+        batch_size=batch_size or cfg.batch_size,
+        num_workers=nw,
+        pin_memory=True,
+        drop_last=False,
+        prefetch_factor=4 if nw > 0 else None,
+    )
     return DataLoader(
         wrapped,
         batch_size=batch_size or cfg.batch_size,
