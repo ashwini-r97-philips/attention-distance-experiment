@@ -232,7 +232,7 @@ def main():
         print(f"  Regulariser: {cfg.reg_type}, lambda={cfg.lambda_reg}")
 
     # Data
-    print(f"Loading ImageNet from {cfg.dataset_root}...")
+    print(f"Loading ImageNet from HuggingFace: {cfg.hf_dataset} (streaming)...")
     train_loader = get_train_loader(cfg)
     val_loader = get_val_loader(cfg, batch_size=max(cfg.batch_size, 256))
     attn_eval_loader, attn_eval_indices = get_attention_eval_subset(cfg)

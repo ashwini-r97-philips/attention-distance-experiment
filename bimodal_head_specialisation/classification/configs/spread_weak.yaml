@@ -1,7 +1,7 @@
 # Spread loss: ViT-S/16 ImageNet-1K, CE + MAD variance maximisation
 # Tuned for NVIDIA L4 (24 GB)
 model_name: vit_small_patch16_224
-dataset_root: /sudarshana/data/imagenet
+hf_dataset: ILSVRC/imagenet-1k
 output_dir: runs/spread_weak_vit_s16_imagenet1k
 
 num_classes: 1000

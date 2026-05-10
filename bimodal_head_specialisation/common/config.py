@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 DEFAULTS = {
     # Paths
-    "dataset_root": "/sudarshana/data/imagenet",
+    "hf_dataset": "ILSVRC/imagenet-1k",
     "output_dir": None,  # set per-run
+    "n_val_images": 50000,
 
     # Device
     "device": "cuda:0",

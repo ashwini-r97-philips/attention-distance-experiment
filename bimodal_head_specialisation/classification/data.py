@@ -1,14 +1,11 @@
-"""ImageNet-1K data loading with standard ViT augmentation.
+"""ImageNet-1K data loading via HuggingFace datasets (streaming).
 
-Expected folder structure:
-    dataset_root/
-        train/
-            n01440764/
-            n01443537/
-            ...
-        val/
-            n01440764/
-            ...
+Uses `datasets.load_dataset("ILSVRC/imagenet-1k", streaming=True)` so
+ImageNet is never fully downloaded to disk.  The HF token must be set
+via the HF_TOKEN env-var or `huggingface-cli login`.
+
+For the attention-eval subset we materialise a small fixed slice of the
+validation split into memory.
 """
 
 import os
@@ -18,9 +15,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import numpy as np
-from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
+from PIL import Image
+from torch.utils.data import DataLoader, IterableDataset, Dataset, Subset
+from torchvision import transforms
+from datasets import load_dataset
 
+
+# ─── Transforms ───────────────────────────────────────────────────────────────
 
 def build_train_transform(cfg):
     return transforms.Compose([
@@ -41,58 +42,132 @@ def build_val_transform(cfg):
     ])
 
 
-def get_train_dataset(cfg):
-    train_dir = os.path.join(cfg.dataset_root, "train")
-    return datasets.ImageFolder(train_dir, transform=build_train_transform(cfg))
+# ─── HuggingFace streaming wrapper ───────────────────────────────────────────
+
+class HFStreamingDataset(IterableDataset):
+    """Wraps a HuggingFace IterableDataset for use with PyTorch DataLoader.
+
+    Each example is expected to have an 'image' (PIL) and 'label' (int) field.
+    Images are converted to RGB and transformed on the fly.
+    """
+
+    def __init__(self, hf_dataset, transform, seed=42, shuffle_buffer=10_000):
+        super().__init__()
+        self.hf_dataset = hf_dataset
+        self.transform = transform
+        self.seed = seed
+        self.shuffle_buffer = shuffle_buffer
+
+    def __iter__(self):
+        # Shuffle with a buffer for training; no-ops for val (buffer=0)
+        ds = self.hf_dataset
+        if self.shuffle_buffer > 0:
+            ds = ds.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
+
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # Split the stream across DataLoader workers
+            ds = _split_iterable_for_worker(ds, worker_info)
+
+        for example in ds:
+            img = example["image"]
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            label = example["label"]
+            yield self.transform(img), label
 
 
-def get_val_dataset(cfg):
-    val_dir = os.path.join(cfg.dataset_root, "val")
-    return datasets.ImageFolder(val_dir, transform=build_val_transform(cfg))
+def _split_iterable_for_worker(ds, worker_info):
+    """Yield every n-th example so workers don't duplicate data."""
+    worker_id = worker_info.id
+    num_workers = worker_info.num_workers
+    for i, item in enumerate(ds):
+        if i % num_workers == worker_id:
+            yield item
+
+
+class HFMapDataset(Dataset):
+    """Wraps a list of materialised HF examples as a map-style Dataset."""
+
+    def __init__(self, examples, transform):
+        self.examples = examples
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        ex = self.examples[idx]
+        img = ex["image"]
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        return self.transform(img), ex["label"]
+
+
+# ─── Dataset / Loader factories ───────────────────────────────────────────────
+
+def _hf_name(cfg):
+    return getattr(cfg, "hf_dataset", "ILSVRC/imagenet-1k")
 
 
 def get_train_loader(cfg):
-    ds = get_train_dataset(cfg)
-    g = torch.Generator()
-    g.manual_seed(cfg.seed)
+    ds = load_dataset(_hf_name(cfg), split="train", streaming=True,
+                      trust_remote_code=True)
+    wrapped = HFStreamingDataset(ds, build_train_transform(cfg),
+                                  seed=cfg.seed, shuffle_buffer=10_000)
     return DataLoader(
-        ds,
+        wrapped,
         batch_size=cfg.batch_size,
-        shuffle=True,
         num_workers=cfg.num_workers,
         pin_memory=True,
         drop_last=True,
-        generator=g,
-        persistent_workers=cfg.num_workers > 0,
+        # IterableDataset: shuffle is handled inside the dataset
     )
 
 
 def get_val_loader(cfg, batch_size=None):
-    ds = get_val_dataset(cfg)
+    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True,
+                      trust_remote_code=True)
+    wrapped = HFStreamingDataset(ds, build_val_transform(cfg),
+                                  seed=cfg.seed, shuffle_buffer=0)
     return DataLoader(
-        ds,
+        wrapped,
         batch_size=batch_size or cfg.batch_size,
-        shuffle=False,
         num_workers=cfg.num_workers,
         pin_memory=True,
         drop_last=False,
-        persistent_workers=cfg.num_workers > 0,
     )
 
 
 def get_attention_eval_subset(cfg):
-    """Return a fixed-index subset of the validation set for attention analysis."""
-    val_ds = get_val_dataset(cfg)
-    n = min(cfg.attention_eval_subset_size, len(val_ds))
+    """Materialise a fixed-index subset of the validation set for attention analysis.
+
+    Because the streaming dataset has no random access, we iterate through
+    the validation split once, deterministically selecting
+    `attention_eval_subset_size` examples spaced evenly across the 50 000
+    validation images.
+    """
+    n_val = getattr(cfg, "n_val_images", 50_000)
+    n = min(cfg.attention_eval_subset_size, n_val)
     rng = np.random.RandomState(cfg.seed)
-    indices = rng.choice(len(val_ds), size=n, replace=False)
-    indices.sort()
-    sub = Subset(val_ds, indices.tolist())
+    target_indices = set(sorted(rng.choice(n_val, size=n, replace=False)))
+
+    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True,
+                      trust_remote_code=True)
+
+    examples = []
+    for i, ex in enumerate(ds):
+        if i in target_indices:
+            examples.append(ex)
+        if len(examples) >= n:
+            break
+
+    subset = HFMapDataset(examples, build_val_transform(cfg))
     loader = DataLoader(
-        sub,
+        subset,
         batch_size=cfg.batch_size,
         shuffle=False,
-        num_workers=cfg.num_workers,
+        num_workers=min(cfg.num_workers, 4),
         pin_memory=True,
     )
-    return loader, indices.tolist()
+    return loader, sorted(target_indices)
