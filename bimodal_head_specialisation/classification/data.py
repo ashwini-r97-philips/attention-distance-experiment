@@ -111,8 +111,7 @@ def _hf_name(cfg):
 
 
 def get_train_loader(cfg):
-    ds = load_dataset(_hf_name(cfg), split="train", streaming=True,
-                      trust_remote_code=True)
+    ds = load_dataset(_hf_name(cfg), split="train", streaming=True)
     wrapped = HFStreamingDataset(ds, build_train_transform(cfg),
                                   seed=cfg.seed, shuffle_buffer=10_000)
     return DataLoader(
@@ -126,8 +125,7 @@ def get_train_loader(cfg):
 
 
 def get_val_loader(cfg, batch_size=None):
-    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True,
-                      trust_remote_code=True)
+    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True)
     wrapped = HFStreamingDataset(ds, build_val_transform(cfg),
                                   seed=cfg.seed, shuffle_buffer=0)
     return DataLoader(
@@ -152,8 +150,7 @@ def get_attention_eval_subset(cfg):
     rng = np.random.RandomState(cfg.seed)
     target_indices = set(sorted(rng.choice(n_val, size=n, replace=False)))
 
-    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True,
-                      trust_remote_code=True)
+    ds = load_dataset(_hf_name(cfg), split="validation", streaming=True)
 
     examples = []
     for i, ex in enumerate(ds):
