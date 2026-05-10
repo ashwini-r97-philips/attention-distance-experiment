@@ -20,12 +20,16 @@ import subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import warnings
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
 from timm.data.mixup import Mixup
 from tqdm import tqdm
+
+# Silence harmless PIL warnings from ImageNet JPEGs with corrupt EXIF
+warnings.filterwarnings("ignore", message="Corrupt EXIF data", category=UserWarning)
 
 from common.config import load_config, save_config
 from common.model_utils import load_vit_small
@@ -137,7 +141,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device,
 
         optimizer.zero_grad()
 
-        with autocast():
+        with torch.amp.autocast("cuda"):
             outputs = model(images)
             task_loss = criterion(outputs, targets)
 
@@ -252,7 +256,7 @@ def main():
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = get_cosine_schedule_with_warmup(optimizer, cfg.warmup_epochs, cfg.epochs)
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     # Distance matrix
     dist_matrix = build_distance_matrix(cfg.grid_h, cfg.grid_w, device=device)
