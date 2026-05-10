@@ -134,7 +134,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device,
     total_grad_norm = 0.0
     n_steps = 0
 
-    for images, targets in tqdm(train_loader, desc="Train", leave=False):
+    for images, targets in train_loader:
         images, targets = images.to(device), targets.to(device)
         if mixup_fn is not None:
             images, targets = mixup_fn(images, targets)
@@ -281,7 +281,8 @@ def main():
         print(f"  Resumed at epoch {start_epoch}, best acc1={best_acc1:.2f}%")
 
     # ─── Training loop ───────────────────────────────────────────────────
-    for epoch in range(start_epoch, cfg.epochs + 1):
+    epoch_pbar = tqdm(range(start_epoch, cfg.epochs + 1), desc="Epochs", unit="ep")
+    for epoch in epoch_pbar:
         t0 = time.time()
         wf = get_reg_warmup_factor(epoch, cfg.lambda_warmup_epochs)
 
@@ -348,6 +349,11 @@ def main():
 
         reg_str = f" reg={train_metrics['reg_loss']:.6f}" if cfg.reg_type != "none" else ""
         best_str = " *BEST*" if is_best else ""
+        epoch_pbar.set_postfix_str(
+            f"loss={train_metrics['train_loss']:.4f} "
+            f"acc1={val_metrics['val_acc1']:.2f}% "
+            f"lr={optimizer.param_groups[0]['lr']:.2e}{best_str}"
+        )
         print(f"Epoch {epoch:3d}/{cfg.epochs} | "
               f"loss={train_metrics['train_loss']:.4f}{reg_str} | "
               f"val_acc1={val_metrics['val_acc1']:.2f}% "
