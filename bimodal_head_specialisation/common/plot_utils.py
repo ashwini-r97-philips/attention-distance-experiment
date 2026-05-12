@@ -24,7 +24,7 @@ def plot_training_curves(logs, save_path, title_prefix=""):
 
     def _plot(ax, key, label, color="b"):
         vals = [e.get(key, 0) for e in logs]
-        ax.plot(epochs, vals, f"{color}-", linewidth=1.2)
+        ax.plot(epochs, vals, color=color, linestyle="-", linewidth=1.2)
         ax.set_xlabel("Epoch")
         ax.set_title(label)
         ax.grid(True, alpha=0.3)

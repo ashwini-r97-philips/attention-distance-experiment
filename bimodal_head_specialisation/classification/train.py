@@ -243,14 +243,16 @@ def main():
     with open(os.path.join(output_dir, "attn_eval_indices.json"), "w") as f:
         json.dump(attn_eval_indices, f)
 
-    # Mixup / CutMix
-    mixup_fn = Mixup(
-        mixup_alpha=cfg.mixup_alpha,
-        cutmix_alpha=cfg.cutmix_alpha,
-        prob=cfg.mixup_prob,
-        switch_prob=cfg.mixup_switch_prob,
-        num_classes=cfg.num_classes,
-    )
+    # Mixup / CutMix (disabled when both alphas are 0)
+    mixup_fn = None
+    if cfg.mixup_alpha > 0 or cfg.cutmix_alpha > 0:
+        mixup_fn = Mixup(
+            mixup_alpha=cfg.mixup_alpha,
+            cutmix_alpha=cfg.cutmix_alpha,
+            prob=cfg.mixup_prob,
+            switch_prob=cfg.mixup_switch_prob,
+            num_classes=cfg.num_classes,
+        )
 
     # Loss, optimizer, scheduler
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
