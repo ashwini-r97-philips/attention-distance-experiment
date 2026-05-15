@@ -288,10 +288,28 @@ def main():
         t0 = time.time()
         wf = get_reg_warmup_factor(epoch, cfg.lambda_warmup_epochs)
 
-        train_metrics = train_one_epoch(
-            model, train_loader, optimizer, criterion, device,
-            mixup_fn, reg_fn, reg_blocks, wf, scaler, cfg,
-        )
+        # Retry epoch on transient streaming errors
+        max_epoch_retries = 3
+        for attempt in range(1, max_epoch_retries + 1):
+            try:
+                train_metrics = train_one_epoch(
+                    model, train_loader, optimizer, criterion, device,
+                    mixup_fn, reg_fn, reg_blocks, wf, scaler, cfg,
+                )
+                break  # success
+            except RuntimeError as e:
+                err_msg = str(e)
+                if attempt < max_epoch_retries and any(kw in err_msg.lower() for kw in [
+                    "client has been closed", "connection reset",
+                    "timed out", "timeout", "cannot send",
+                ]):
+                    print(f"\n  ⚠ Epoch {epoch} streaming error (attempt {attempt}/{max_epoch_retries}), "
+                          f"retrying: {err_msg[:120]}")
+                    # Re-create train loader to get fresh HTTP connections
+                    train_loader = get_train_loader(cfg)
+                    time.sleep(5 * attempt)
+                    continue
+                raise
         scheduler.step()
 
         val_metrics = validate(model, val_loader, criterion, device)

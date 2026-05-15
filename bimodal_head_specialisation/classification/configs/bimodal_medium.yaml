@@ -1,8 +1,7 @@
-# Bimodal mixture: ViT-S/16 ImageNet-1K, CE + bimodal Gaussian prior on MAD
-# Tuned for single NVIDIA L4 (24 GB)
+# Bimodal medium: stronger emergent bimodal pressure
 model_name: vit_small_patch16_224
 hf_dataset: ILSVRC/imagenet-1k
-output_dir: runs/bimodal_weak_vit_s16_imagenet1k
+output_dir: runs/bimodal_medium_vit_s16_imagenet1k
 
 num_classes: 1000
 epochs: 20
@@ -17,17 +16,26 @@ seed: 42
 num_workers: 2
 
 reg_type: bimodal
-lambda_reg: 0.001
+
+# stronger regularization
+lambda_reg: 0.003
 lambda_warmup_epochs: 5
+
+# extend deeper
 regularized_blocks: [0, 1, 2, 3, 4, 5, 6, 7]
 
-# Bimodal prior parameters
-m_loc: 0.20
-m_glob: 0.65
-sigma_loc: 0.08
-sigma_glob: 0.12
+# realistic ViT-S modes
+m_loc: 0.12
+m_glob: 0.38
+
+# tighter clusters
+sigma_loc: 0.04
+sigma_glob: 0.05
+
+# balanced mixture
 pi_mix: 0.5
 
+# diagnostics
 attention_eval_subset_size: 1024
 attention_eval_frequency_epochs: 1
 attention_map_frequency_epochs: 5

@@ -10,6 +10,8 @@ validation split into memory.
 
 import os
 import sys
+import time
+import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -19,6 +21,8 @@ from PIL import Image
 from torch.utils.data import DataLoader, IterableDataset, Dataset, Subset
 from torchvision import transforms
 from datasets import load_dataset
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Transforms ───────────────────────────────────────────────────────────────
@@ -77,7 +81,48 @@ class HFStreamingDataset(IterableDataset):
         if self.shuffle_buffer > 0:
             ds = ds.shuffle(seed=self.seed, buffer_size=self.shuffle_buffer)
 
-        for example in ds:
+        max_retries = 5
+        retry = 0
+        iterator = iter(ds)
+        while True:
+            try:
+                example = next(iterator)
+                retry = 0  # reset on success
+            except StopIteration:
+                break
+            except (RuntimeError, OSError, ConnectionError, Exception) as e:
+                err_msg = str(e)
+                # Only retry on network-related errors
+                if any(kw in err_msg.lower() for kw in [
+                    "client has been closed", "connection reset",
+                    "timed out", "timeout", "connection error",
+                    "http error", "broken pipe", "eof occurred",
+                ]):
+                    retry += 1
+                    if retry > max_retries:
+                        logger.error(f"Streaming failed after {max_retries} retries: {e}")
+                        raise
+                    wait = min(2 ** retry, 30)
+                    logger.warning(f"Streaming error (retry {retry}/{max_retries}), "
+                                   f"waiting {wait}s: {e}")
+                    time.sleep(wait)
+                    # Re-create the iterator from the dataset
+                    ds_fresh = self.hf_dataset
+                    if worker_info is not None and worker_info.num_workers > 1:
+                        ds_fresh = ds_fresh.shard(
+                            num_shards=worker_info.num_workers,
+                            index=worker_info.id,
+                        )
+                    if self.shuffle_buffer > 0:
+                        ds_fresh = ds_fresh.shuffle(
+                            seed=self.seed + retry,
+                            buffer_size=self.shuffle_buffer,
+                        )
+                    iterator = iter(ds_fresh)
+                    continue
+                else:
+                    raise
+
             img = example["image"]
             if img.mode != "RGB":
                 img = img.convert("RGB")

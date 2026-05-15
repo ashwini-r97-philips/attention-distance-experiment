@@ -1,0 +1,39 @@
+# Bimodal high: aggressive emergent specialization
+model_name: vit_small_patch16_224
+hf_dataset: ILSVRC/imagenet-1k
+output_dir: runs/bimodal_high_vit_s16_imagenet1k
+
+num_classes: 1000
+epochs: 20
+batch_size: 384
+lr: 0.00002
+weight_decay: 0.05
+warmup_epochs: 2
+label_smoothing: 0.0
+mixup_alpha: 0.0
+cutmix_alpha: 0.0
+seed: 42
+num_workers: 2
+
+reg_type: bimodal
+
+# aggressive pressure
+lambda_reg: 0.01
+lambda_warmup_epochs: 5
+
+# regularize most of network
+regularized_blocks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+# sharper local/global split
+m_loc: 0.08
+m_glob: 0.40
+
+# very tight modes
+sigma_loc: 0.025
+sigma_glob: 0.035
+
+pi_mix: 0.5
+
+attention_eval_subset_size: 1024
+attention_eval_frequency_epochs: 1
+attention_map_frequency_epochs: 5
