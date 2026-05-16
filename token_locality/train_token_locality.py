@@ -28,7 +28,10 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "bimodal_head_specialisation"))
+sys.path.insert(0, os.path.join(_HERE, "..", "bimodal_head_specialisation", "classification"))
+sys.path.insert(0, _HERE)
 
 import numpy as np
 import torch
@@ -47,7 +50,7 @@ from common.mad_metrics import (
     compute_local_mass,
     compute_attention_entropy,
 )
-from common.token_locality_gate import TokenLocalityGateModule
+from token_locality_gate import TokenLocalityGateModule
 from data import get_train_loader, get_val_loader, get_attention_eval_subset
 
 

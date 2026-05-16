@@ -178,12 +178,26 @@ class DeiTSegModel(nn.Module):
 
         return logits
 
-    def get_encoder_param_groups(self, backbone_lr, decoder_lr):
-        """Separate param groups for differential learning rates."""
-        encoder_params = list(self.encoder.parameters())
+    def get_encoder_param_groups(self, backbone_lr, decoder_lr, gate_module=None, gate_lr=None):
+        """Separate param groups for differential learning rates.
+
+        If gate_module is provided, its parameters are placed in a third group
+        at gate_lr (defaults to 10× backbone_lr if not specified).
+        """
+        gate_param_ids = set()
+        gate_params = []
+        if gate_module is not None:
+            gate_params = gate_module.get_gate_params()
+            gate_param_ids = {id(p) for p in gate_params}
+
+        encoder_params = [p for p in self.encoder.parameters() if id(p) not in gate_param_ids]
         decoder_params = list(self.decoder.parameters()) + list(self.aux_head.parameters())
 
-        return [
+        groups = [
             {"params": encoder_params, "lr": backbone_lr},
             {"params": decoder_params, "lr": decoder_lr},
         ]
+        if gate_params:
+            lr = gate_lr if gate_lr is not None else backbone_lr * 10.0
+            groups.append({"params": gate_params, "lr": lr})
+        return groups

@@ -16,7 +16,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SEG_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SEG_DIR)
+_TOKEN_LOCALITY_DIR = os.path.join(os.path.dirname(_PROJECT_ROOT), "token_locality")
+
+sys.path.insert(0, _PROJECT_ROOT)
+sys.path.insert(0, _TOKEN_LOCALITY_DIR)
 
 import numpy as np
 import torch
@@ -172,7 +177,8 @@ def train_one_epoch(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", type=str, required=True, choices=["baseline", "regularized"])
+    parser.add_argument("--mode", type=str, required=True,
+                        choices=["baseline", "regularized", "gaussian_bias", "token_locality_v3"])
     parser.add_argument("--epochs", type=int, default=cfg.EPOCHS)
     parser.add_argument("--batch_size", type=int, default=cfg.BATCH_SIZE)
     parser.add_argument("--backbone_lr", type=float, default=cfg.BACKBONE_LR)
@@ -183,6 +189,19 @@ def main():
     parser.add_argument("--lambda_compact", type=float, default=cfg.LAMBDA_COMPACT)
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from (e.g. checkpoints/best.pth)")
+    # Gate options (gaussian_bias and token_locality_v3 modes)
+    parser.add_argument("--gate_blocks", type=int, nargs="+", default=list(range(0, 6)),
+                        help="Transformer block indices to install gates on")
+    parser.add_argument("--gate_lr_multiplier", type=float, default=10.0,
+                        help="Gate LR = backbone_lr * gate_lr_multiplier")
+    parser.add_argument("--gate_scale", type=float, default=2.0,
+                        help="tanh ceiling for v3 gate values")
+    parser.add_argument("--gate_distance_scale", type=float, default=2.0,
+                        help="Multiplier on distance penalty before softmax (v3)")
+    parser.add_argument("--gate_weight_std", type=float, default=0.02,
+                        help="Init std for gate linear weights")
+    parser.add_argument("--gaussian_init_sigma", type=float, default=0.25,
+                        help="Initial σ for LearnedGaussianBias")
     args = parser.parse_args()
 
     device = cfg.DEVICE
@@ -192,8 +211,12 @@ def main():
         output_dir = args.output_dir
     elif mode == "baseline":
         output_dir = cfg.BASELINE_SEG_DIR
-    else:
+    elif mode == "regularized":
         output_dir = cfg.REGULARIZED_SEG_DIR
+    elif mode == "gaussian_bias":
+        output_dir = os.path.join(cfg.OUTPUT_DIR, "gaussian_bias_seg")
+    else:  # token_locality_v3
+        output_dir = os.path.join(cfg.OUTPUT_DIR, "token_v3_seg")
 
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "checkpoints"), exist_ok=True)
@@ -205,6 +228,8 @@ def main():
     print(f"Output: {output_dir}")
     if mode == "regularized":
         print(f"λ_gap={args.lambda_gap}, λ_compact={args.lambda_compact}, warmup={cfg.WARMUP_EPOCHS} epochs")
+    if mode in ("gaussian_bias", "token_locality_v3"):
+        print(f"Gate blocks: {args.gate_blocks}, gate_lr_multiplier={args.gate_lr_multiplier}")
     print("=" * 60)
 
     with open(os.path.join(output_dir, "args.json"), "w") as f:
@@ -218,9 +243,40 @@ def main():
     print(f"  Input: {cfg.IMG_SIZE}×{cfg.IMG_SIZE} → {cfg.GRID_H}×{cfg.GRID_W} = {cfg.NUM_PATCHES} tokens")
 
     regularized_blocks = cfg.REGULARIZED_BLOCKS
+    gate_module = None
+
     if mode == "regularized":
         patch_attention_forward(model.encoder, regularized_blocks, differentiable=True)
         print(f"  Patched blocks {regularized_blocks} for differentiable attention capture")
+
+    elif mode == "gaussian_bias":
+        from gate_modules_seg import LearnedGaussianBiasModule
+        gate_module = LearnedGaussianBiasModule(
+            model=model,
+            block_indices=args.gate_blocks,
+            num_heads=cfg.NUM_HEADS,
+            grid=cfg.GRID_H,
+            device=device,
+            init_sigma=args.gaussian_init_sigma,
+        ).to(device)
+        n_gate = sum(p.numel() for p in gate_module.parameters())
+        print(f"  LearnedGaussianBias installed on blocks {args.gate_blocks} ({n_gate} gate params)")
+
+    elif mode == "token_locality_v3":
+        from token_locality_gate_v3 import TokenLocalityGateModuleV3
+        gate_module = TokenLocalityGateModuleV3(
+            model=model,
+            block_indices=args.gate_blocks,
+            embed_dim=cfg.EMBED_DIM,
+            num_heads=cfg.NUM_HEADS,
+            grid=cfg.GRID_H,
+            gate_distance_scale=args.gate_distance_scale,
+            gate_scale=args.gate_scale,
+            device=device,
+            weight_std=args.gate_weight_std,
+        ).to(device)
+        n_gate = sum(p.numel() for p in gate_module.parameters())
+        print(f"  TokenLocalityGateV3 installed on blocks {args.gate_blocks} ({n_gate} gate params)")
 
     # Data
     print(f"Loading ADE20K from {cfg.DATA_ROOT}...")
@@ -243,7 +299,9 @@ def main():
         )
 
     # Optimizer with differential LR
-    param_groups = model.get_encoder_param_groups(args.backbone_lr, args.decoder_lr)
+    gate_lr = args.backbone_lr * args.gate_lr_multiplier if gate_module is not None else None
+    param_groups = model.get_encoder_param_groups(args.backbone_lr, args.decoder_lr,
+                                                  gate_module=gate_module, gate_lr=gate_lr)
     optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.WEIGHT_DECAY)
     scheduler = get_poly_schedule(optimizer, total_epochs=args.epochs)
 
@@ -326,6 +384,8 @@ def main():
         if reg_info:
             last = reg_info[-1]
             log_entry["last_reg_info"] = {k: v for k, v in last.items() if isinstance(v, (int, float, str))}
+        if gate_module is not None:
+            log_entry["gate_stats"] = gate_module.gate_statistics()
 
         epoch_logs.append(log_entry)
         with open(os.path.join(output_dir, "training_log.json"), "w") as f:
@@ -335,13 +395,16 @@ def main():
         is_best = miou > best_miou
         if is_best:
             best_miou = miou
-            torch.save({
+            ckpt = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_miou": miou,
                 "val_boundary_f1": bf1,
-            }, os.path.join(output_dir, "checkpoints", "best.pth"))
+            }
+            if gate_module is not None:
+                ckpt["gate_state_dict"] = gate_module.state_dict()
+            torch.save(ckpt, os.path.join(output_dir, "checkpoints", "best.pth"))
 
         reg_str = f"  reg_loss={avg_reg_loss:.6f}" if mode == "regularized" else ""
         best_str = " *BEST*" if is_best else ""
@@ -351,12 +414,15 @@ def main():
               f"{elapsed:.0f}s{best_str}")
 
     # Final checkpoint
-    torch.save({
+    final_ckpt = {
         "epoch": args.epochs,
         "model_state_dict": model.state_dict(),
         "val_miou": miou,
         "val_boundary_f1": bf1,
-    }, os.path.join(output_dir, "checkpoints", "final.pth"))
+    }
+    if gate_module is not None:
+        final_ckpt["gate_state_dict"] = gate_module.state_dict()
+    torch.save(final_ckpt, os.path.join(output_dir, "checkpoints", "final.pth"))
 
     print(f"\nTraining complete. Best mIoU: {best_miou:.4f}")
     print(f"Checkpoints and logs saved to {output_dir}")

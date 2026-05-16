@@ -15,7 +15,9 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "bimodal_head_specialisation"))
+sys.path.insert(0, _HERE)
 
 import torch
 import torch.nn.functional as F
@@ -26,7 +28,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
 
 from common.config import load_config
-from common.token_locality_gate import (
+from token_locality_gate import (
     TokenLocalityGateModule,
     build_patch_distance_matrix,
     LocalityGateBranch,

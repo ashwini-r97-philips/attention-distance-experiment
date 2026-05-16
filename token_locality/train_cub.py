@@ -23,7 +23,9 @@ import sys
 import time
 import traceback
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "bimodal_head_specialisation"))
+sys.path.insert(0, _HERE)
 
 import numpy as np
 import torch
@@ -50,10 +52,11 @@ from common.mad_metrics import (
     compute_local_mass,
     compute_attention_entropy,
 )
-from common.token_locality_gate_v2 import (
+from token_locality_gate_v2 import (
     TokenLocalityGateModuleV2,
     FixedLocalityPrior,
 )
+from token_locality_gate_v3 import TokenLocalityGateModuleV3
 
 
 # ─── CUB Dataset ─────────────────────────────────────────────────────────────
@@ -301,7 +304,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, scaler, c
 
 def find_max_batch_size(cfg, device, start=256):
     """Find largest batch size that doesn't OOM."""
-    from common.token_locality_gate import TokenLocalityGateModule
+    from token_locality_gate import TokenLocalityGateModule
 
     bs = start
     while bs >= 16:
@@ -331,6 +334,19 @@ def find_max_batch_size(cfg, device, start=256):
                     gate_distance_scale=getattr(cfg, "gate_distance_scale", 4.0),
                     device=device,
                     init_bias=getattr(cfg, "gate_init_bias", -5.0),
+                    weight_std=getattr(cfg, "gate_weight_std", 0.02),
+                )
+                gate = gate.to(device)
+            elif cfg.reg_type == "token_locality_v3":
+                gate = TokenLocalityGateModuleV3(
+                    model=model,
+                    block_indices=cfg.regularized_blocks,
+                    embed_dim=cfg.embed_dim,
+                    num_heads=cfg.num_heads,
+                    grid=cfg.grid_h,
+                    gate_distance_scale=getattr(cfg, "gate_distance_scale", 2.0),
+                    gate_scale=getattr(cfg, "gate_scale", 2.0),
+                    device=device,
                     weight_std=getattr(cfg, "gate_weight_std", 0.02),
                 )
                 gate = gate.to(device)
@@ -471,7 +487,7 @@ def main():
     # ── Token locality gate / fixed prior ──
     gate_module = None
     if cfg.reg_type == "token_locality":
-        from common.token_locality_gate import TokenLocalityGateModule
+        from token_locality_gate import TokenLocalityGateModule
         gate_module = TokenLocalityGateModule(
             model=model,
             block_indices=cfg.regularized_blocks,
@@ -501,6 +517,23 @@ def main():
         print(f"  Gate module (v2) installed on blocks {cfg.regularized_blocks}")
         print(f"  Gate parameters: {n_gate:,}")
         print(f"  Gate init bias: {getattr(cfg, 'gate_init_bias', -5.0)} → Softplus output ≈ {F.softplus(torch.tensor(getattr(cfg, 'gate_init_bias', -5.0))).item():.5f}")
+    elif cfg.reg_type == "token_locality_v3":
+        gate_module = TokenLocalityGateModuleV3(
+            model=model,
+            block_indices=cfg.regularized_blocks,
+            embed_dim=cfg.embed_dim,
+            num_heads=cfg.num_heads,
+            grid=cfg.grid_h,
+            gate_distance_scale=getattr(cfg, "gate_distance_scale", 2.0),
+            gate_scale=getattr(cfg, "gate_scale", 2.0),
+            device=device,
+            weight_std=getattr(cfg, "gate_weight_std", 0.02),
+        )
+        gate_module = gate_module.to(device)
+        n_gate = sum(p.numel() for p in gate_module.parameters())
+        gate_scale = getattr(cfg, "gate_scale", 2.0)
+        print(f"  Gate module (v3) installed on blocks {cfg.regularized_blocks}")
+        print(f"  Gate parameters: {n_gate:,}  (per-head, signed tanh × {gate_scale})")
     elif cfg.reg_type == "fixed_locality_prior":
         gate_module = FixedLocalityPrior(
             model=model,
