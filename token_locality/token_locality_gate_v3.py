@@ -116,6 +116,8 @@ class LocalityGateBranchV3(nn.Module):
         # Tracked for logging
         self._last_output_mean: float = 0.0
         self._last_output_std: float = 0.0
+        self._last_per_head_mean: list = [0.0] * num_heads
+        self._last_per_head_std: list = [0.0] * num_heads
 
     def forward(self, x_norm: torch.Tensor) -> torch.Tensor:
         """
@@ -127,9 +129,12 @@ class LocalityGateBranchV3(nn.Module):
         out = self.gate_scale * torch.tanh(self.linear(x_norm))  # (B, N, H)
         if self.training:
             with torch.no_grad():
-                patch_out = out[:, 1:, :]  # exclude CLS
+                patch_out = out[:, 1:, :]  # exclude CLS  (B, Np, H)
                 self._last_output_mean = patch_out.mean().item()
                 self._last_output_std = patch_out.std().item()
+                # Per-head: mean and std over (B, Np)
+                self._last_per_head_mean = patch_out.mean(dim=(0, 1)).tolist()   # [H]
+                self._last_per_head_std = patch_out.std(dim=(0, 1)).tolist()     # [H]
         return out
 
 
@@ -261,6 +266,8 @@ class TokenLocalityGateModuleV3(nn.Module):
                 "bias_std": float(b.std()),
                 "gate_output_mean": gate._last_output_mean,
                 "gate_output_std": gate._last_output_std,
+                "per_head_mean": [round(v, 4) for v in gate._last_per_head_mean],
+                "per_head_std":  [round(v, 4) for v in gate._last_per_head_std],
             }
         return stats
 
