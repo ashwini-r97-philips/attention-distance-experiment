@@ -654,7 +654,8 @@ def main():
             print("  [Gate] ", end="")
             for bk, s in gate_stats_dict.items():
                 if "gate_output_mean" in s:
-                    print(f"{bk}: out={s['gate_output_mean']:.4f}±{s.get('gate_output_std', 0):.4f} b={s['bias']:.3f}  ", end="")
+                    bias_str = f"{s['bias_mean']:.3f}" if "bias_mean" in s else f"{s.get('bias', 0):.3f}"
+                    print(f"{bk}: out={s['gate_output_mean']:.4f}±{s.get('gate_output_std', 0):.4f} b={bias_str}  ", end="")
                 else:
                     print(f"{bk}: μ={s['weight_mean']:+.4f} σ={s['weight_std']:.4f}  ", end="")
             print()
@@ -704,7 +705,8 @@ def main():
                     "weight_std": round(s["weight_std"], 6),
                     "weight_min": round(s.get("weight_min", 0), 6),
                     "weight_max": round(s.get("weight_max", 0), 6),
-                    "bias": round(s["bias"], 6),
+                    "bias_mean": round(s.get("bias_mean", s.get("bias", 0)), 6),
+                    "bias_std": round(s.get("bias_std", 0), 6),
                     "gate_output_mean": round(s.get("gate_output_mean", 0), 6),
                     "gate_output_std": round(s.get("gate_output_std", 0), 6),
                 }
