@@ -1,0 +1,41 @@
+# Token locality MEDIUM on CUB-200-2011
+# Blocks 0-7, gate_distance_scale=4.0 (same as ImageNet minimal)
+# Start from ImageNet pretrained ViT-S, NOT from any fine-tuned checkpoint.
+
+model_name: vit_small_patch16_224
+hf_dataset: bentrevett/caltech-ucsd-birds-200-2011
+output_dir: runs/cub/token_locality_medium_cub_vit_s16
+num_classes: 200
+
+# Training
+epochs: 20
+batch_size: 256
+lr: 0.00001
+weight_decay: 0.05
+warmup_epochs: 2
+label_smoothing: 0.0
+mixup_alpha: 0.0
+cutmix_alpha: 0.0
+seed: 42
+num_workers: 4
+grad_clip_norm: 1.0
+
+# Token locality gate
+reg_type: token_locality
+lambda_reg: 1.0
+regularized_blocks: [0, 1, 2, 3, 4, 5, 6, 7]
+gate_init_scale: 0.01
+gate_distance_scale: 4.0
+
+# Attention analysis
+tau_values: [0.15, 0.25, 0.35]
+attention_eval_subset_size: 512
+attention_eval_frequency_epochs: 1
+
+# Speed
+amp: true
+channels_last: true
+compile: false
+cudnn_benchmark: true
+persistent_workers: true
+prefetch_factor: 4

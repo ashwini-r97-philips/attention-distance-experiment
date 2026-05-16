@@ -1,0 +1,56 @@
+# Token-conditioned locality gate experiment (minimal, 5-epoch test)
+#
+# Purpose:
+#   Test whether a per-token learned locality gate produces a larger
+#   localization effect than bimodal regularization.
+#
+# Start this experiment with:
+#   python train_token_locality.py --config configs/token_locality_minimal_vit_s16.yaml
+#
+# DO NOT start automatically. Requires explicit user invocation.
+
+model_name: vit_small_patch16_224
+hf_dataset: ILSVRC/imagenet-1k
+output_dir: runs/token_locality_minimal_vit_s16_imagenet1k
+
+num_classes: 1000
+
+# Short test run — 5 epochs only
+epochs: 5
+batch_size: 384
+lr: 0.00002
+weight_decay: 0.05
+warmup_epochs: 1
+label_smoothing: 0.0
+mixup_alpha: 0.0
+cutmix_alpha: 0.0
+seed: 42
+num_workers: 2
+
+# Token locality gate settings
+reg_type: token_locality
+lambda_reg: 1.0          # scale applied to the gate penalty term
+
+# Apply gate only to blocks 0-7 (leave last 4 layers free)
+regularized_blocks: [0, 1, 2, 3, 4, 5, 6, 7]
+
+# Gate initialisation: scale of near-zero init for gate branch Linear
+gate_init_scale: 0.01
+
+# Distance penalty: additive bias on attention logits proportional to
+# patch-distance * gate_value.  Strength of penalty per unit distance.
+gate_distance_scale: 4.0
+
+# Diagnostics
+attention_eval_subset_size: 1024
+attention_eval_frequency_epochs: 1
+attention_map_frequency_epochs: 5
+tau_values: [0.15, 0.25, 0.35]
+
+# Fast localization eval after training completes
+# Run on same 2000-image subset used for bimodal_medium comparison
+run_localization_eval_after_training: true
+localization_eval_num_images: 2000
+localization_eval_seed: 42
+localization_eval_annotation_dir: data/imagenet_loc_annotations
+localization_eval_baseline_checkpoint: runs/baseline_vit_s16_imagenet1k/checkpoints/best.pth
