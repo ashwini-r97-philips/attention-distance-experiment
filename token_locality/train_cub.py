@@ -56,7 +56,7 @@ from token_locality_gate_v2 import (
     TokenLocalityGateModuleV2,
     FixedLocalityPrior,
 )
-from token_locality_gate_v3 import TokenLocalityGateModuleV3
+from token_locality_gate_v3 import TokenLocalityGateModuleV3, VectorKernelGateModule
 
 
 # ─── CUB Dataset ─────────────────────────────────────────────────────────────
@@ -350,6 +350,21 @@ def find_max_batch_size(cfg, device, start=256):
                     weight_std=getattr(cfg, "gate_weight_std", 0.02),
                 )
                 gate = gate.to(device)
+            elif cfg.reg_type == "token_locality_v3_vec":
+                gate = VectorKernelGateModule(
+                    model=model,
+                    block_indices=cfg.regularized_blocks,
+                    embed_dim=cfg.embed_dim,
+                    num_heads=cfg.num_heads,
+                    grid=cfg.grid_h,
+                    gate_distance_scale=getattr(cfg, "gate_distance_scale", 2.0),
+                    gate_scale=getattr(cfg, "gate_scale", 2.0),
+                    device=device,
+                    num_basis=getattr(cfg, "gate_num_basis", 16),
+                    hidden_dim=getattr(cfg, "gate_hidden_dim", 64),
+                    weight_std=getattr(cfg, "gate_weight_std", 0.02),
+                )
+                gate = gate.to(device)
             elif cfg.reg_type == "fixed_locality_prior":
                 gate = FixedLocalityPrior(
                     model=model,
@@ -379,7 +394,7 @@ def find_max_batch_size(cfg, device, start=256):
                 scaler.update()
 
             del model, dummy, out, loss, optimizer, scaler
-            if cfg.reg_type in ("token_locality", "token_locality_v2", "fixed_locality_prior"):
+            if 'gate' in dir():
                 del gate
             torch.cuda.empty_cache()
             print(f"  Batch size {bs}: OK")
@@ -534,6 +549,26 @@ def main():
         gate_scale = getattr(cfg, "gate_scale", 2.0)
         print(f"  Gate module (v3) installed on blocks {cfg.regularized_blocks}")
         print(f"  Gate parameters: {n_gate:,}  (per-head, signed tanh × {gate_scale})")
+    elif cfg.reg_type == "token_locality_v3_vec":
+        gate_module = VectorKernelGateModule(
+            model=model,
+            block_indices=cfg.regularized_blocks,
+            embed_dim=cfg.embed_dim,
+            num_heads=cfg.num_heads,
+            grid=cfg.grid_h,
+            gate_distance_scale=getattr(cfg, "gate_distance_scale", 2.0),
+            gate_scale=getattr(cfg, "gate_scale", 2.0),
+            device=device,
+            num_basis=getattr(cfg, "gate_num_basis", 16),
+            hidden_dim=getattr(cfg, "gate_hidden_dim", 64),
+            weight_std=getattr(cfg, "gate_weight_std", 0.02),
+        )
+        gate_module = gate_module.to(device)
+        n_gate = sum(p.numel() for p in gate_module.parameters())
+        num_basis = getattr(cfg, "gate_num_basis", 16)
+        hidden_dim = getattr(cfg, "gate_hidden_dim", 64)
+        print(f"  Gate module (v3-vec) installed on blocks {cfg.regularized_blocks}")
+        print(f"  Gate parameters: {n_gate:,}  (MLP→{hidden_dim}→H×{num_basis} RBF basis, signed tanh)")
     elif cfg.reg_type == "fixed_locality_prior":
         gate_module = FixedLocalityPrior(
             model=model,

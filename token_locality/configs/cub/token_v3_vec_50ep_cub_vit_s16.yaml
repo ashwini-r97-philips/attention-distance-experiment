@@ -1,0 +1,49 @@
+# Token locality v3-vec on CUB-200-2011 — 50 epochs
+# Vector-kernel gate: each token predicts a K-dim vector per head.
+# Penalty = dot(gate_vec[b,i,h], rbf_features[i,j]) * gate_distance_scale
+# Allows learned arbitrary distance tuning curves (not just linear scaling).
+#
+# MLP: Linear(384→64, GELU) → Linear(64→num_heads*num_basis)
+# gate_num_basis=16 RBF centres evenly spaced in [0,1]
+# gate_scale=2.0 → signed tanh output in (-2, +2) per basis per head
+
+model_name: vit_small_patch16_224
+hf_dataset: bentrevett/caltech-ucsd-birds-200-2011
+output_dir: runs/cub/token_v3_vec_50ep_cub_vit_s16
+num_classes: 200
+
+# Training
+epochs: 50
+batch_size: 384
+lr: 0.00001
+weight_decay: 0.05
+warmup_epochs: 3
+label_smoothing: 0.0
+mixup_alpha: 0.0
+cutmix_alpha: 0.0
+seed: 42
+num_workers: 4
+grad_clip_norm: 1.0
+
+# Token locality gate v3-vec (MLP, vector kernel, RBF distance features)
+reg_type: token_locality_v3_vec
+regularized_blocks: [0, 1, 2, 3, 4, 5, 8, 9, 10, 11]
+gate_distance_scale: 2.0
+gate_scale: 2.0
+gate_num_basis: 16
+gate_hidden_dim: 64
+gate_weight_std: 0.02
+gate_lr_multiplier: 10.0
+
+# Attention analysis
+tau_values: [0.15, 0.25, 0.35]
+attention_eval_subset_size: 512
+attention_eval_frequency_epochs: 1
+
+# Speed
+amp: true
+channels_last: true
+compile: false
+cudnn_benchmark: true
+persistent_workers: true
+prefetch_factor: 4
