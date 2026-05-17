@@ -737,8 +737,8 @@ def main():
                 gate_row = {
                     "epoch": epoch,
                     "block": bk,
-                    "weight_mean": round(s["weight_mean"], 6),
-                    "weight_std": round(s["weight_std"], 6),
+                    "weight_mean": round(s.get("weight_mean", 0), 6),
+                    "weight_std": round(s.get("weight_std", 0), 6),
                     "weight_min": round(s.get("weight_min", 0), 6),
                     "weight_max": round(s.get("weight_max", 0), 6),
                     "bias_mean": round(s.get("bias_mean", s.get("bias", 0)), 6),
