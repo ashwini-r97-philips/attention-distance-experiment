@@ -94,8 +94,9 @@ def build_train_transform(cfg):
 
 
 def build_val_transform(cfg):
+    resize_to = int(cfg.img_size * 256 / 224)  # proportional to training convention
     return transforms.Compose([
-        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.Resize(resize_to, interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(cfg.img_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=cfg.imagenet_mean, std=cfg.imagenet_std),
@@ -309,7 +310,8 @@ def find_max_batch_size(cfg, device, start=256):
     bs = start
     while bs >= 16:
         try:
-            model = timm.create_model(cfg.model_name, pretrained=False, num_classes=cfg.num_classes)
+            model = timm.create_model(cfg.model_name, pretrained=False, num_classes=cfg.num_classes,
+                                       img_size=getattr(cfg, "img_size", 224))
             model = model.to(device)
             if getattr(cfg, "channels_last", False):
                 model = model.to(memory_format=torch.channels_last)
