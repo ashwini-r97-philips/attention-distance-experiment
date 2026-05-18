@@ -11,6 +11,7 @@ def load_vit_small(cfg, pretrained=True):
         cfg.model_name,
         pretrained=pretrained,
         num_classes=cfg.num_classes,
+        img_size=getattr(cfg, "img_size", 224),
     )
     model = model.to(cfg.device)
     return model
