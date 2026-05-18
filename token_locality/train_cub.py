@@ -483,13 +483,18 @@ def main():
             print(f"  gate_lr_mult:   {getattr(cfg, 'gate_lr_multiplier', 10.0)}")
     print("=" * 70)
 
-    # ── Auto batch size ──
-    requested_bs = cfg.batch_size
-    if requested_bs <= 0 or requested_bs > 1024:
-        requested_bs = 512
-    print(f"\nFinding max batch size (starting at {requested_bs})...")
-    batch_size = find_max_batch_size(cfg, device, start=requested_bs)
-    print(f"  Using batch size: {batch_size}")
+    # ── Batch size ──
+    fixed_bs = getattr(cfg, "fixed_batch_size", 0)
+    if fixed_bs > 0:
+        batch_size = fixed_bs
+        print(f"\nUsing fixed batch size: {batch_size}")
+    else:
+        requested_bs = cfg.batch_size
+        if requested_bs <= 0 or requested_bs > 1024:
+            requested_bs = 512
+        print(f"\nFinding max batch size (starting at {requested_bs})...")
+        batch_size = find_max_batch_size(cfg, device, start=requested_bs)
+        print(f"  Using batch size: {batch_size}")
     grad_accum = max(1, 512 // batch_size)
     print(f"  Gradient accumulation: {grad_accum} (effective: {batch_size * grad_accum})")
 

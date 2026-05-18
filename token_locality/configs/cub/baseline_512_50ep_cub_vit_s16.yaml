@@ -6,6 +6,7 @@ img_size: 512
 
 epochs: 50
 batch_size: 384
+fixed_batch_size: 16
 lr: 0.00001
 weight_decay: 0.05
 warmup_epochs: 3
