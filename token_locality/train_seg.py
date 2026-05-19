@@ -26,6 +26,7 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_PROJECT_ROOT, "bimodal_head_specialisation"))
 
 import numpy as np
 import torch
