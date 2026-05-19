@@ -31,7 +31,6 @@ sys.path.insert(0, os.path.join(_PROJECT_ROOT, "bimodal_head_specialisation"))
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
 from seg_model import (
@@ -155,7 +154,7 @@ def train_one_epoch(model, train_loader, optimizer, criterion, device, scaler,
         masks = masks.to(device)
         optimizer.zero_grad()
 
-        with autocast():
+        with torch.amp.autocast("cuda"):
             logits, aux_logits = model(images, return_aux=True)
             loss = (criterion(logits, masks)
                     + aux_weight * criterion(aux_logits, masks))
@@ -186,7 +185,7 @@ def main():
     parser.add_argument("--data_root", required=True,
                         help="Path to ADEChallengeData2016/")
     parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--backbone_lr", type=float, default=1e-5)
     parser.add_argument("--decoder_lr", type=float, default=1e-4)
     parser.add_argument("--output_dir", type=str, default=None)
@@ -282,7 +281,7 @@ def main():
     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     scheduler = get_poly_schedule(optimizer, total_epochs=args.epochs)
     criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
 
     # ── Resume ──
     start_epoch = 1
